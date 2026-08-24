@@ -41,7 +41,9 @@ class CallService : Service() {
             type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         }
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
-        return START_STICKY
+        // The room remains alive while the app is merely backgrounded, but must not
+        // be recreated after the user deliberately swipes MHTalk away from Recents.
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
