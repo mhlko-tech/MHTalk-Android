@@ -4,8 +4,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-fun configValue(name: String): String =
-    (providers.gradleProperty(name).orNull ?: System.getenv(name) ?: "")
+fun configValue(name: String, fallback: String = ""): String =
+    (providers.gradleProperty(name).orNull ?: System.getenv(name) ?: fallback)
         .replace("\\", "\\\\")
         .replace("\"", "\\\"")
 
@@ -17,17 +17,17 @@ android {
         applicationId = "com.mhlko.talk"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.1.1"
+        versionCode = 5
+        versionName = "1.2.0"
 
         buildConfigField("String", "LIVEKIT_URL", "\"wss://mhtalkremake-utuei6i7.livekit.cloud\"")
         buildConfigField("String", "TOKEN_ENDPOINT", "\"https://mhtalk-token-service.mhlkotalk.workers.dev/livekit/token\"")
-        buildConfigField("String", "SUPABASE_URL", "\"${configValue("MHTALK_SUPABASE_URL")}\"")
-        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"${configValue("MHTALK_SUPABASE_PUBLISHABLE_KEY")}\"")
-        buildConfigField("String", "FIREBASE_PROJECT_ID", "\"${configValue("MHTALK_FIREBASE_PROJECT_ID")}\"")
-        buildConfigField("String", "FIREBASE_APP_ID", "\"${configValue("MHTALK_FIREBASE_APP_ID")}\"")
-        buildConfigField("String", "FIREBASE_API_KEY", "\"${configValue("MHTALK_FIREBASE_API_KEY")}\"")
-        buildConfigField("String", "FIREBASE_SENDER_ID", "\"${configValue("MHTALK_FIREBASE_SENDER_ID")}\"")
+        buildConfigField("String", "SUPABASE_URL", "\"${configValue("MHTALK_SUPABASE_URL", "https://fcadjrqrrzcvbyqrgnnm.supabase.co")}\"")
+        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"${configValue("MHTALK_SUPABASE_PUBLISHABLE_KEY", "sb_publishable_3Azp3R7eFE8YI81Eg_Bekw_D353_Efc")}\"")
+        buildConfigField("String", "FIREBASE_PROJECT_ID", "\"${configValue("MHTALK_FIREBASE_PROJECT_ID", "mhtalk-d5f01")}\"")
+        buildConfigField("String", "FIREBASE_APP_ID", "\"${configValue("MHTALK_FIREBASE_APP_ID", "1:1013525860234:android:f77f491d0a26728589c273")}\"")
+        buildConfigField("String", "FIREBASE_API_KEY", "\"${configValue("MHTALK_FIREBASE_API_KEY", "AIzaSyBn6zhT9gD3eAN3cG8OC5Oz9e3wqY-Kvo0")}\"")
+        buildConfigField("String", "FIREBASE_SENDER_ID", "\"${configValue("MHTALK_FIREBASE_SENDER_ID", "1013525860234")}\"")
     }
 
     signingConfigs {
