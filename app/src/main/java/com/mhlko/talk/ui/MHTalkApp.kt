@@ -22,6 +22,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -53,6 +55,10 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -60,6 +66,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.viewinterop.AndroidView
 import com.mhlko.talk.BuildConfig
+import com.mhlko.talk.R
 import com.mhlko.talk.call.SessionViewModel
 import com.mhlko.talk.data.ConnectionStatus
 import com.mhlko.talk.data.MemberUi
@@ -68,6 +75,7 @@ import com.mhlko.talk.data.UserProfile
 import com.mhlko.talk.data.ChatMessageUi
 import com.mhlko.talk.data.ShareQuality
 import com.mhlko.talk.auth.AuthRepository
+import com.mhlko.talk.auth.AuthRules
 import com.mhlko.talk.auth.AuthState
 import com.mhlko.talk.auth.FriendProfile
 import com.mhlko.talk.auth.IncomingFriendRequest
@@ -108,10 +116,13 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         LaunchScreen()
         return
     }
+    LaunchedEffect(authState) {
+        if (authState !is AuthState.SignedIn && state.roomName != null) session.leave()
+    }
     if (authState !is AuthState.SignedIn) {
         RequiredSignInScreen(
             authState = authState,
-            onGoogle = { auth.beginSignIn("google") },
+            auth = auth,
             onRetry = { appScope.launch { auth.initialize() } },
         )
         return
@@ -876,12 +887,46 @@ private fun PipVideoScreen(track: VideoTrack?, session: SessionViewModel) {
     }
 }
 
+private enum class AuthMode { Login, Register, Forgot, Verification, Reset }
+
 @Composable
-private fun RequiredSignInScreen(
-    authState: AuthState,
-    onGoogle: () -> Unit,
-    onRetry: () -> Unit,
-) {
+private fun RequiredSignInScreen(authState: AuthState, auth: AuthRepository, onRetry: () -> Unit) {
+    val context = LocalContext.current
+    var mode by remember { mutableStateOf(AuthMode.Login) }
+    var identifier by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("") }
+    var displayName by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    var acceptedTerms by remember { mutableStateOf(false) }
+    var localBusy by remember { mutableStateOf(false) }
+    var localError by remember { mutableStateOf("") }
+    var notice by remember { mutableStateOf("") }
+    var resendSeconds by remember { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+    val busy = localBusy || authState == AuthState.Checking || authState == AuthState.Authenticating
+
+    LaunchedEffect(authState) {
+        when (authState) {
+            is AuthState.AwaitingVerification -> { email = authState.email; mode = AuthMode.Verification }
+            AuthState.PasswordRecovery -> mode = AuthMode.Reset
+            else -> Unit
+        }
+    }
+    LaunchedEffect(resendSeconds) {
+        if (resendSeconds > 0) { delay(1_000); resendSeconds-- }
+    }
+    fun switchMode(next: AuthMode) { mode = next; localError = ""; notice = "" }
+    fun perform(block: suspend () -> Unit) {
+        scope.launch {
+            localBusy = true; localError = ""; notice = ""
+            runCatching { block() }.onFailure { localError = it.message ?: "Something went wrong. Try again." }
+            localBusy = false
+        }
+    }
+
     Box(
         Modifier.fillMaxSize().background(
             Brush.verticalGradient(listOf(Color(0xFF11152A), Color(0xFF090C16))),
@@ -889,62 +934,157 @@ private fun RequiredSignInScreen(
         contentAlignment = Alignment.Center,
     ) {
         Card(
-            modifier = Modifier.fillMaxWidth().widthIn(max = 430.dp),
+            modifier = Modifier.fillMaxWidth().widthIn(max = 460.dp),
             shape = RoundedCornerShape(28.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1E32)),
             border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF434A70)),
         ) {
             Column(
-                Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 34.dp),
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 25.dp, vertical = 28.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(13.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Box(
-                    Modifier.size(86.dp).clip(RoundedCornerShape(25.dp)).background(
-                        Brush.linearGradient(listOf(Color(0xFF8B78FF), Color(0xFF5B4ADE))),
-                    ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("M", color = Color.White, fontSize = 50.sp, fontWeight = FontWeight.Black)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(13.dp)) {
+                    Box(
+                        Modifier.size(58.dp).clip(RoundedCornerShape(17.dp)).background(
+                            Brush.linearGradient(listOf(Color(0xFF8B78FF), Color(0xFF5B4ADE))),
+                        ), contentAlignment = Alignment.Center,
+                    ) { Text("M", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Black) }
+                    Column {
+                        Text("MHTalk", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Black)
+                        Text("Voice, video and rooms · v${BuildConfig.VERSION_NAME}", color = MHTalkMuted, fontSize = 11.sp)
+                    }
                 }
-                Text("MHTalk ${BuildConfig.VERSION_NAME}", color = Color.White, fontSize = 33.sp, fontWeight = FontWeight.Black)
-                Text("Sign in required", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                Text(
-                    "Your account keeps your profile, friends and room invitations synchronized between phone and PC.",
-                    color = MHTalkMuted,
-                    fontSize = 14.sp,
-                    lineHeight = 21.sp,
-                )
-                when (authState) {
-                    AuthState.Checking -> Row(
+                HorizontalDivider(color = Color(0xFF303650))
+
+                if (authState == AuthState.Checking) {
+                    Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                        Text("Verifying your account…", color = MHTalkMuted)
+                        Text("Restoring your secure session…", color = MHTalkMuted)
                     }
-                    AuthState.Authenticating -> {
-                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                        Text("Complete sign-in in your browser…", color = MHTalkMuted)
+                } else if (mode == AuthMode.Verification) {
+                    Icon(Icons.Rounded.MarkEmailRead, null, tint = Color(0xFFA99CFF), modifier = Modifier.size(48.dp))
+                    Text("Verify your email", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text("We sent a confirmation link to $email. Open it on this device to activate your account.", color = MHTalkMuted, lineHeight = 20.sp)
+                    Button(
+                        onClick = { perform { auth.resendVerification(email); resendSeconds = 60; notice = "A new verification email was sent." } },
+                        enabled = !busy && resendSeconds == 0, modifier = Modifier.fillMaxWidth().height(48.dp),
+                    ) { Text(if (resendSeconds > 0) "Resend in ${resendSeconds}s" else "Resend verification email") }
+                    TextButton(onClick = { switchMode(AuthMode.Login) }) { Text("Back to login") }
+                } else {
+                    Text(
+                        when (mode) { AuthMode.Login -> "Welcome back"; AuthMode.Register -> "Create your account"; AuthMode.Forgot -> "Reset your password"; else -> "Choose a new password" },
+                        color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        when (mode) { AuthMode.Login -> "Sign in to continue to MHTalk."; AuthMode.Register -> "One account works on phone and PC."; AuthMode.Forgot -> "Enter your username or email and we’ll send instructions."; else -> "Use at least 10 characters for your new password." },
+                        color = MHTalkMuted, fontSize = 13.sp,
+                    )
+
+                    if (mode == AuthMode.Register) {
+                        OutlinedTextField(username, { username = it.filter { char -> char.isLetterOrDigit() || char == '_' }.take(32) }, Modifier.fillMaxWidth(), label = { Text("Username") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Next))
+                        OutlinedTextField(displayName, { displayName = it.take(60) }, Modifier.fillMaxWidth(), label = { Text("Display name") }, singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next))
+                        OutlinedTextField(email, { email = it }, Modifier.fillMaxWidth(), label = { Text("Email") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next))
                     }
-                    else -> {
-                        Button(onClick = onGoogle, modifier = Modifier.fillMaxWidth().height(50.dp)) {
-                            Text("Continue with Google", fontWeight = FontWeight.Bold)
+                    if (mode == AuthMode.Login || mode == AuthMode.Forgot) {
+                        OutlinedTextField(identifier, { identifier = it }, Modifier.fillMaxWidth(), label = { Text("Username or Email") }, singleLine = true, keyboardOptions = KeyboardOptions(imeAction = if (mode == AuthMode.Forgot) ImeAction.Done else ImeAction.Next))
+                    }
+                    if (mode == AuthMode.Login || mode == AuthMode.Register || mode == AuthMode.Reset) {
+                        OutlinedTextField(
+                            password, { password = it }, Modifier.fillMaxWidth(), label = { Text("Password") }, singleLine = true,
+                            visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = { IconButton({ passwordVisible = !passwordVisible }) { Icon(if (passwordVisible) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, null) } },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = if (mode == AuthMode.Login) ImeAction.Done else ImeAction.Next),
+                        )
+                    }
+                    if (mode == AuthMode.Register || mode == AuthMode.Reset) {
+                        OutlinedTextField(confirmation, { confirmation = it }, Modifier.fillMaxWidth(), label = { Text("Confirm password") }, singleLine = true, visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done))
+                    }
+                    if (mode == AuthMode.Login) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            TextButton({ switchMode(AuthMode.Register) }, contentPadding = PaddingValues(0.dp)) { Text("Register new account", fontSize = 12.sp) }
+                            TextButton({ switchMode(AuthMode.Forgot) }, contentPadding = PaddingValues(0.dp)) { Text("Forgot password?", fontSize = 12.sp) }
                         }
-                        if (authState is AuthState.Failed) {
-                            Text(authState.message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                            OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("Try again") }
+                    }
+                    if (mode == AuthMode.Register) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                            Checkbox(acceptedTerms, { acceptedTerms = it })
+                            Column(Modifier.padding(top = 7.dp)) {
+                                Text("I agree to the:", color = MHTalkMuted, fontSize = 12.sp)
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    TextButton(
+                                        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://mhtalk-token-service.mhlkotalk.workers.dev/terms"))) },
+                                        contentPadding = PaddingValues(0.dp),
+                                    ) { Text("Terms of Service", fontSize = 12.sp) }
+                                    Text("and", color = MHTalkMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 13.dp))
+                                    TextButton(
+                                        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://mhtalk-token-service.mhlkotalk.workers.dev/privacy"))) },
+                                        contentPadding = PaddingValues(0.dp),
+                                    ) { Text("Privacy Policy", fontSize = 12.sp) }
+                                }
+                            }
                         }
-                        if (authState is AuthState.Unavailable) {
-                            Text("Account service is unavailable. Check your connection and try again.", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                            OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("Try again") }
+                    }
+
+                    val displayedError = localError.ifBlank { (authState as? AuthState.Failed)?.message.orEmpty() }
+                    if (displayedError.isNotBlank()) Text(displayedError, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    if (notice.isNotBlank()) Text(notice, color = Color(0xFF8EE5BD), fontSize = 12.sp)
+                    if (authState == AuthState.Unavailable) {
+                        Text("Account service is unavailable. Check your connection and try again.", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                        OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("Try again") }
+                    }
+
+                    Button(
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth().height(49.dp),
+                        onClick = {
+                            perform {
+                                when (mode) {
+                                    AuthMode.Login -> auth.login(identifier, password)
+                                    AuthMode.Register -> {
+                                        require(AuthRules.usernameError(username) == null) { AuthRules.usernameError(username)!! }
+                                        require(AuthRules.passwordError(password) == null) { AuthRules.passwordError(password)!! }
+                                        require(password == confirmation) { "Passwords do not match" }
+                                        require(acceptedTerms) { "Accept the Terms and Privacy Policy to continue" }
+                                        require(auth.usernameAvailable(username)) { "Username is unavailable" }
+                                        auth.register(username, displayName, email, password)
+                                    }
+                                    AuthMode.Forgot -> { auth.requestPasswordReset(identifier); notice = "If an account matches this information, password reset instructions have been sent." }
+                                    AuthMode.Reset -> {
+                                        require(AuthRules.passwordError(password) == null) { AuthRules.passwordError(password)!! }
+                                        require(password == confirmation) { "Passwords do not match" }
+                                        auth.completePasswordRecovery(password)
+                                    }
+                                    else -> Unit
+                                }
+                            }
                         }
+                    ) {
+                        if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
+                        else Text(when (mode) { AuthMode.Login -> "Login"; AuthMode.Register -> "Create account"; AuthMode.Forgot -> "Send reset instructions"; else -> "Save new password" }, fontWeight = FontWeight.Bold)
+                    }
+
+                    if (mode == AuthMode.Login) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { HorizontalDivider(Modifier.weight(1f), color = Color(0xFF343A57)); Text("  OR  ", color = MHTalkMuted, fontSize = 10.sp); HorizontalDivider(Modifier.weight(1f), color = Color(0xFF343A57)) }
+                        Button(
+                            onClick = { auth.beginSignIn("google") }, enabled = !busy,
+                            modifier = Modifier.fillMaxWidth().height(49.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFF222532)),
+                        ) { androidx.compose.foundation.Image(painterResource(R.drawable.ic_google_logo), null, Modifier.size(20.dp)); Spacer(Modifier.width(10.dp)); Text("Log in using Google", fontWeight = FontWeight.Bold) }
+                    } else if (mode != AuthMode.Reset) {
+                        TextButton({ switchMode(AuthMode.Login) }) { Text("Back to login") }
+                    } else {
+                        TextButton({ perform { auth.cancelPasswordRecovery() } }) { Text("Cancel") }
                     }
                 }
+                HorizontalDivider(color = Color(0xFF303650))
                 Text(
-                    "You must be signed in before MHTalk can open rooms or start a call.",
+                    "Protected sign-in · Your password is never stored by MHTalk",
                     color = Color(0xFF858EAC),
-                    fontSize = 12.sp,
+                    fontSize = 10.sp,
                     lineHeight = 17.sp,
                 )
             }
@@ -1644,7 +1784,8 @@ private fun FriendsDialog(
         text = {
             when (authState) {
                 AuthState.Unavailable -> Text("Accounts are ready. Add the Supabase project URL and publishable key to activate them.", color = MHTalkMuted)
-                AuthState.Checking, AuthState.SignedOut, AuthState.Authenticating, is AuthState.Failed -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                AuthState.Checking, AuthState.SignedOut, AuthState.Authenticating, AuthState.PasswordRecovery,
+                is AuthState.AwaitingVerification, is AuthState.Failed -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Sign in to use the same profile and friends on phone and PC.", color = MHTalkMuted)
                     Button(onGoogle, Modifier.fillMaxWidth(), enabled = authState != AuthState.Authenticating) { Text("Continue with Google") }
                     OutlinedButton(onFacebook, Modifier.fillMaxWidth(), enabled = authState != AuthState.Authenticating) { Text("Continue with Facebook") }

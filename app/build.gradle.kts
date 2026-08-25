@@ -17,8 +17,8 @@ android {
         applicationId = "com.mhlko.talk"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.2.1"
+        versionCode = 7
+        versionName = "1.3.0"
 
         buildConfigField("String", "LIVEKIT_URL", "\"wss://mhtalkremake-utuei6i7.livekit.cloud\"")
         buildConfigField("String", "TOKEN_ENDPOINT", "\"https://mhtalk-token-service.mhlkotalk.workers.dev/livekit/token\"")

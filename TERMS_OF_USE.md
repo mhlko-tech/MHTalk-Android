@@ -1,8 +1,10 @@
 # MHTalk Terms of Use
 
-Effective date: August 20, 2026
+Effective date: August 26, 2026
 
 By using MHTalk, you agree to use it lawfully and respectfully. You must not upload, transmit or encourage harassment, threats, hate, sexual exploitation, child abuse material, illegal activity, malware, privacy violations, impersonation, fraud, spam, or copyright infringement.
+
+Keep your sign-in credentials secure and do not access another person's account. MHTalk may rate-limit, suspend or remove accounts used for abuse, automated attacks, impersonation or attempts to compromise the service or other users.
 
 You must own or have permission to share content sent through MHTalk. Public Main content may be automatically filtered. Users can report content and users, block users, and leave any room. MHTalk may restrict access or preserve a safety report where necessary to protect users, enforce these terms or comply with law.
 
