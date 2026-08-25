@@ -66,6 +66,11 @@ import com.mhlko.talk.data.SessionUiState
 import com.mhlko.talk.data.UserProfile
 import com.mhlko.talk.data.ChatMessageUi
 import com.mhlko.talk.data.ShareQuality
+import com.mhlko.talk.auth.AuthRepository
+import com.mhlko.talk.auth.AuthState
+import com.mhlko.talk.auth.FriendProfile
+import com.mhlko.talk.auth.IncomingFriendRequest
+import com.mhlko.talk.auth.SocialRepository
 import com.mhlko.talk.ui.theme.*
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
@@ -74,6 +79,10 @@ import io.livekit.android.renderer.SurfaceViewRenderer
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import livekit.org.webrtc.RendererCommon
+import livekit.org.webrtc.VideoFrame
+import livekit.org.webrtc.VideoSink
+import kotlin.math.abs
 
 object PipController {
     var inPictureInPicture by mutableStateOf(false)
@@ -84,6 +93,11 @@ object PipController {
 fun MHTalkApp(session: SessionViewModel = viewModel()) {
     val state by session.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val auth = remember(context) { AuthRepository.get(context) }
+    val social = remember(context) { SocialRepository.get(context) }
+    val authState by auth.state.collectAsStateWithLifecycle()
+    val socialState by social.state.collectAsStateWithLifecycle()
+    val appScope = rememberCoroutineScope()
     if (PipController.inPictureInPicture) {
         PipVideoScreen(PipController.track, session)
         return
@@ -130,6 +144,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     var privateSheet by remember { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showFriends by remember { mutableStateOf(false) }
     var showHelp by remember { mutableStateOf(false) }
     var shareOptionsOpen by remember { mutableStateOf(false) }
     var pendingProfilePhoto by remember { mutableStateOf<Uri?>(null) }
@@ -137,6 +152,22 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         if (uri != null) pendingProfilePhoto = uri
     }
     var tab by remember { mutableIntStateOf(0) }
+    LaunchedEffect(authState) {
+        val signedIn = authState as? AuthState.SignedIn ?: return@LaunchedEffect
+        session.saveProfile(
+            UserProfile(
+                name = signedIn.account.displayName,
+                bio = signedIn.account.bio.orEmpty(),
+                avatar = signedIn.account.avatarUrl ?: signedIn.account.displayName.take(1).uppercase(),
+            ),
+        )
+    }
+    LaunchedEffect(state.localProfile.avatar, authState) {
+        if (authState is AuthState.SignedIn && state.localProfile.avatar.startsWith("data:image/")) {
+            runCatching { auth.updateProfile(state.localProfile.name, state.localProfile.bio, state.localProfile.avatar) }
+                .onFailure { session.showNotice(it.message ?: "Could not sync profile photo") }
+        }
+    }
     Scaffold(
         containerColor = MHTalkBackground,
         bottomBar = {
@@ -150,6 +181,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
             Header(
                 state = state,
                 onEditProfile = { showProfile = true },
+                onFriends = { showFriends = true; appScope.launch { social.refresh() } },
                 onSettings = { showSettings = true },
                 onHelp = { showHelp = true },
                 onReport = {
@@ -206,10 +238,38 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         onDismiss = { showProfile = false },
         onSave = {
             session.saveProfile(it)
+            if (authState is AuthState.SignedIn) appScope.launch {
+                runCatching { auth.updateProfile(it.name, it.bio) }
+                    .onFailure { session.showNotice(it.message ?: "Could not sync profile") }
+            }
             showProfile = false
         },
         onChoosePhoto = { profilePhotoPicker.launch(arrayOf("image/*")) },
         onRemovePhoto = session::removeProfilePhoto,
+    )
+    if (showFriends) FriendsDialog(
+        authState = authState,
+        friends = socialState.friends,
+        requests = socialState.requests,
+        loading = socialState.loading,
+        error = socialState.error,
+        onDismiss = { showFriends = false },
+        onGoogle = { auth.beginSignIn("google") },
+        onFacebook = { auth.beginSignIn("facebook") },
+        onSignOut = { appScope.launch { auth.signOut() } },
+        onSearch = social::search,
+        onAdd = social::sendFriendRequest,
+        onRespond = social::respond,
+        onInvite = { friendId ->
+            appScope.launch {
+                runCatching { social.invite(friendId) }
+                    .onSuccess { invite ->
+                        showFriends = false
+                        invite.inviteCode?.let { code -> withCallPermission { session.joinPrivate(code) } }
+                    }
+                    .onFailure { session.showNotice(it.message ?: "Could not invite friend") }
+            }
+        },
     )
     if (showSettings) SettingsDialog(
         state = state,
@@ -223,6 +283,22 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         onScreenPrivacy = session::setScreenSharePrivacy,
     )
     if (showHelp) HelpDialog(onDismiss = { showHelp = false })
+    socialState.invite?.let { invite ->
+        val sender = socialState.friends.firstOrNull { it.id == invite.senderId }
+        AlertDialog(
+            onDismissRequest = social::clearInvite,
+            title = { Text("Room invitation") },
+            text = { Text("${sender?.displayName ?: "A friend"} invited you to join an MHTalk room. The invitation expires after 10 minutes.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    social.clearInvite()
+                    if (invite.inviteCode != null) withCallPermission { session.joinPrivate(invite.inviteCode) }
+                    else withCallPermission(session::joinMain)
+                }) { Text("Join") }
+            },
+            dismissButton = { TextButton(social::clearInvite) { Text("Not now") } },
+        )
+    }
     if (shareOptionsOpen) ShareOptionsDialog(
         onDismiss = { shareOptionsOpen = false },
         onStart = { options ->
@@ -331,6 +407,7 @@ private fun LaunchScreen() {
 private fun Header(
     state: SessionUiState,
     onEditProfile: () -> Unit,
+    onFriends: () -> Unit,
     onSettings: () -> Unit,
     onHelp: () -> Unit,
     onReport: () -> Unit,
@@ -363,6 +440,11 @@ private fun Header(
                     text = { Text("Edit profile") },
                     leadingIcon = { Icon(Icons.Rounded.Person, null) },
                     onClick = { menuOpen = false; onEditProfile() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Friends") },
+                    leadingIcon = { Icon(Icons.Rounded.People, null) },
+                    onClick = { menuOpen = false; onFriends() },
                 )
                 DropdownMenuItem(
                     text = { Text("Settings") },
@@ -640,19 +722,12 @@ private fun VideoTile(
         shape = RoundedCornerShape(18.dp),
     ) {
         Box {
-            AndroidView(
+            AdaptiveVideoRenderer(
+                track = track,
+                session = session,
                 modifier = Modifier.fillMaxSize(),
-                factory = { context ->
-                    SurfaceViewRenderer(context).also {
-                        session.initializeVideoRenderer(it)
-                        it.setMirror(label == "Your camera")
-                        track.addRenderer(it)
-                    }
-                },
-                onRelease = {
-                    track.removeRenderer(it)
-                    it.release()
-                },
+                mirror = label == "Your camera",
+                onAspectRatio = { aspectRatio = it },
             )
             Box(
                 Modifier.fillMaxSize().clickable { if (isScreenShare) controlsVisible = !controlsVisible },
@@ -752,18 +827,11 @@ private fun VideoTile(
                 Modifier.fillMaxSize().background(Color.Black).clickable { fullControlsVisible = !fullControlsVisible },
                 contentAlignment = Alignment.Center,
             ) {
-                AndroidView(
-                    modifier = Modifier.fillMaxWidth().aspectRatio(aspectRatio.coerceIn(0.35f, 3f)),
-                    factory = { context ->
-                        SurfaceViewRenderer(context).also {
-                            session.initializeVideoRenderer(it)
-                            track.addRenderer(it)
-                        }
-                    },
-                    onRelease = { view ->
-                        track.removeRenderer(view)
-                        view.release()
-                    },
+                AdaptiveVideoRenderer(
+                    track = track,
+                    session = session,
+                    modifier = Modifier.fillMaxSize(),
+                    onAspectRatio = { aspectRatio = it },
                 )
                 if (fullControlsVisible) {
                     IconButton(
@@ -778,23 +846,86 @@ private fun VideoTile(
 
 @Composable
 private fun PipVideoScreen(track: VideoTrack?, session: SessionViewModel) {
+    val context = LocalContext.current
     Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
         track?.let { videoTrack ->
-            AndroidView(
+            AdaptiveVideoRenderer(
+                track = videoTrack,
+                session = session,
                 modifier = Modifier.fillMaxSize(),
-                factory = { viewContext ->
-                    SurfaceViewRenderer(viewContext).also {
-                        session.initializeVideoRenderer(it)
-                        videoTrack.addRenderer(it)
+                onAspectRatio = { ratio ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        (context as? Activity)?.setPictureInPictureParams(
+                            PictureInPictureParams.Builder()
+                                .setAspectRatio(Rational((ratio * 1_000).toInt().coerceAtLeast(1), 1_000))
+                                .build(),
+                        )
                     }
-                },
-                onRelease = { view ->
-                    videoTrack.removeRenderer(view)
-                    view.release()
                 },
             )
         }
     }
+}
+
+/**
+ * LiveKit's publication dimensions can lag behind a phone rotation. This sink measures every
+ * decoded WebRTC frame instead, including the frame rotation, and forwards it to LiveKit's
+ * renderer. Compose can therefore reshape the tile as soon as the sender rotates the device.
+ */
+private class AdaptiveVideoSink(
+    private val onAspectRatio: (Float) -> Unit,
+) : VideoSink {
+    @Volatile
+    var renderer: SurfaceViewRenderer? = null
+
+    private var lastAspectRatio = 0f
+
+    override fun onFrame(frame: VideoFrame) {
+        renderer?.onFrame(frame)
+        val width = frame.rotatedWidth
+        val height = frame.rotatedHeight
+        if (width <= 0 || height <= 0) return
+
+        val ratio = width.toFloat() / height.toFloat()
+        if (abs(ratio - lastAspectRatio) >= 0.01f) {
+            lastAspectRatio = ratio
+            renderer?.post { onAspectRatio(ratio.coerceIn(0.35f, 3f)) }
+        }
+    }
+}
+
+@Composable
+private fun AdaptiveVideoRenderer(
+    track: VideoTrack,
+    session: SessionViewModel,
+    modifier: Modifier,
+    mirror: Boolean = false,
+    onAspectRatio: (Float) -> Unit = {},
+) {
+    val currentAspectCallback by rememberUpdatedState(onAspectRatio)
+    val sink = remember(track) { AdaptiveVideoSink { currentAspectCallback(it) } }
+
+    AndroidView(
+        modifier = modifier,
+        factory = { viewContext ->
+            SurfaceViewRenderer(viewContext).also { renderer ->
+                session.initializeVideoRenderer(renderer)
+                renderer.setMirror(mirror)
+                renderer.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+                sink.renderer = renderer
+                track.addRenderer(sink)
+            }
+        },
+        update = { renderer ->
+            renderer.setMirror(mirror)
+            sink.renderer = renderer
+        },
+        onRelease = { renderer ->
+            track.removeRenderer(sink)
+            if (sink.renderer === renderer) sink.renderer = null
+            renderer.release()
+        },
+    )
 }
 
 @Composable
@@ -1399,6 +1530,147 @@ private fun ProfileCropDialog(
         confirmButton = { TextButton({ onUse(zoom, offsetX, offsetY) }) { Text("Use this photo") } },
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun FriendsDialog(
+    authState: AuthState,
+    friends: List<FriendProfile>,
+    requests: List<IncomingFriendRequest>,
+    loading: Boolean,
+    error: String?,
+    onDismiss: () -> Unit,
+    onGoogle: () -> Unit,
+    onFacebook: () -> Unit,
+    onSignOut: () -> Unit,
+    onSearch: suspend (String) -> List<FriendProfile>,
+    onAdd: suspend (String) -> Unit,
+    onRespond: suspend (String, Boolean) -> Unit,
+    onInvite: (String) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var query by remember { mutableStateOf("") }
+    var results by remember { mutableStateOf<List<FriendProfile>>(emptyList()) }
+    var busy by remember { mutableStateOf<String?>(null) }
+    var localError by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Friends") },
+        text = {
+            when (authState) {
+                AuthState.Unavailable -> Text("Accounts are ready. Add the Supabase project URL and publishable key to activate them.", color = MHTalkMuted)
+                AuthState.SignedOut, AuthState.Authenticating, is AuthState.Failed -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Sign in to use the same profile and friends on phone and PC.", color = MHTalkMuted)
+                    Button(onGoogle, Modifier.fillMaxWidth(), enabled = authState != AuthState.Authenticating) { Text("Continue with Google") }
+                    OutlinedButton(onFacebook, Modifier.fillMaxWidth(), enabled = authState != AuthState.Authenticating) { Text("Continue with Facebook") }
+                    if (authState is AuthState.Failed) Text(authState.message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                }
+                is AuthState.SignedIn -> LazyColumn(
+                    Modifier.heightIn(max = 570.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    item {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            SocialAvatar(authState.account.avatarUrl, authState.account.displayName)
+                            Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                                Text(authState.account.displayName, fontWeight = FontWeight.Bold)
+                                Text("@${authState.account.username}", color = MHTalkMuted, fontSize = 12.sp)
+                            }
+                            TextButton(onSignOut) { Text("Sign out") }
+                        }
+                    }
+                    if (requests.isNotEmpty()) {
+                        item { Text("FRIEND REQUESTS", color = MHTalkMuted, fontWeight = FontWeight.Bold, fontSize = 11.sp) }
+                        items(requests, key = { it.requestId }) { request ->
+                            SocialPerson(request.profile) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    TextButton(onClick = { scope.launch { onRespond(request.requestId, true) } }) { Text("Accept") }
+                                    IconButton(onClick = { scope.launch { onRespond(request.requestId, false) } }) { Icon(Icons.Rounded.Close, "Decline") }
+                                }
+                            }
+                        }
+                    }
+                    item {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = query,
+                                onValueChange = { query = it },
+                                modifier = Modifier.weight(1f),
+                                label = { Text("Name or @username") },
+                                singleLine = true,
+                            )
+                            IconButton(
+                                enabled = query.trim().length >= 2 && busy != "search",
+                                onClick = {
+                                    busy = "search"
+                                    scope.launch {
+                                        runCatching { onSearch(query.trim()) }
+                                            .onSuccess { results = it }
+                                            .onFailure { localError = it.message }
+                                        busy = null
+                                    }
+                                },
+                            ) { Icon(Icons.Rounded.Search, "Search") }
+                        }
+                    }
+                    items(results, key = { "search-${it.id}" }) { profile ->
+                        SocialPerson(profile) {
+                            TextButton(
+                                enabled = !profile.isFriend && busy != profile.id,
+                                onClick = {
+                                    busy = profile.id
+                                    scope.launch {
+                                        runCatching { onAdd(profile.id) }
+                                            .onSuccess { results = results.filterNot { it.id == profile.id } }
+                                            .onFailure { localError = it.message }
+                                        busy = null
+                                    }
+                                },
+                            ) { Text(if (profile.isFriend) "Friends" else "Add") }
+                        }
+                    }
+                    item { Text("YOUR FRIENDS", color = MHTalkMuted, fontWeight = FontWeight.Bold, fontSize = 11.sp) }
+                    if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+                    if (!loading && friends.isEmpty()) item { Text("No friends yet. Search by name or username.", color = MHTalkMuted) }
+                    items(friends, key = FriendProfile::id) { friend ->
+                        SocialPerson(friend, showPresence = true) {
+                            Button(onClick = { onInvite(friend.id) }, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 7.dp)) { Text("Invite") }
+                        }
+                    }
+                    (localError ?: error)?.let { message -> item { Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) } }
+                }
+            }
+        },
+        confirmButton = { TextButton(onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
+private fun SocialPerson(profile: FriendProfile, showPresence: Boolean = false, action: @Composable () -> Unit) {
+    Surface(color = Color(0xFF23283D), shape = RoundedCornerShape(14.dp)) {
+        Row(Modifier.fillMaxWidth().padding(9.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box {
+                SocialAvatar(profile.avatarUrl, profile.displayName)
+                if (showPresence) Box(
+                    Modifier.align(Alignment.BottomEnd).size(11.dp).clip(CircleShape)
+                        .background(if (profile.online) MHTalkGreen else Color(0xFF747B92)),
+                )
+            }
+            Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                Text(profile.displayName, fontWeight = FontWeight.Bold, maxLines = 1)
+                Text(if (showPresence) "${if (profile.online) "Online" else "Offline"} · @${profile.username}" else "@${profile.username}", color = MHTalkMuted, fontSize = 11.sp, maxLines = 1)
+            }
+            action()
+        }
+    }
+}
+
+@Composable
+private fun SocialAvatar(url: String?, name: String) {
+    if (!url.isNullOrBlank()) AsyncImage(url, name, contentScale = ContentScale.Crop, modifier = Modifier.size(42.dp).clip(CircleShape))
+    else Box(Modifier.size(42.dp).clip(CircleShape).background(MHTalkPurple), contentAlignment = Alignment.Center) {
+        Text(name.take(1).uppercase(), fontWeight = FontWeight.Black)
+    }
 }
 
 @Composable

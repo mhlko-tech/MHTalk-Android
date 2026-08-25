@@ -1,0 +1,7 @@
+# Copy these non-secret client values to ~/.gradle/gradle.properties or pass them as environment variables.
+MHTALK_SUPABASE_URL=https://your-project.supabase.co
+MHTALK_SUPABASE_PUBLISHABLE_KEY=your-publishable-key
+MHTALK_FIREBASE_PROJECT_ID=your-firebase-project
+MHTALK_FIREBASE_APP_ID=your-android-app-id
+MHTALK_FIREBASE_API_KEY=your-firebase-api-key
+MHTALK_FIREBASE_SENDER_ID=your-sender-id

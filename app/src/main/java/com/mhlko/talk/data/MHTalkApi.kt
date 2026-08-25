@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit
 data class RoomCredentials(val token: String, val roomName: String)
 data class PrivateRoom(val roomName: String, val code: String)
 
-class MHTalkApi {
+class MHTalkApi(private val accessToken: () -> String? = { null }) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
@@ -68,6 +68,7 @@ class MHTalkApi {
     private suspend fun post(url: String, body: JSONObject): JSONObject = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(url)
+            .apply { accessToken()?.let { header("Authorization", "Bearer $it") } }
             .post(body.toString().toRequestBody(jsonType))
             .build()
         client.newCall(request).execute().use { response ->

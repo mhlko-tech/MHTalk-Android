@@ -1,5 +1,6 @@
 package com.mhlko.talk.call
 
+import android.Manifest
 import android.app.Application
 import android.content.Intent
 import android.content.BroadcastReceiver
@@ -22,6 +23,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mhlko.talk.BuildConfig
+import com.mhlko.talk.auth.AuthRepository
 import com.mhlko.talk.data.ChatMessageUi
 import com.mhlko.talk.data.AttachmentUi
 import com.mhlko.talk.data.ConnectionStatus
@@ -65,7 +67,8 @@ import java.io.FileOutputStream
 import java.io.ByteArrayOutputStream
 
 class SessionViewModel(application: Application) : AndroidViewModel(application) {
-    private val api = MHTalkApi()
+    private val auth = AuthRepository.get(application)
+    private val api = MHTalkApi(auth::accessToken)
     private val preferences = application.getSharedPreferences("mhtalk", 0)
     private val room: Room = LiveKit.create(application)
     private val profiles = mutableMapOf<String, UserProfile>()
@@ -576,19 +579,28 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun saveAttachmentToDownloads(attachment: AttachmentUi) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            _state.update { it.copy(notice = "Saving directly to Downloads requires Android 10 or newer") }
+            return
+        }
         viewModelScope.launch {
             runCatching {
-                val resolver = getApplication<Application>().contentResolver
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, attachment.name)
-                    put(MediaStore.Downloads.MIME_TYPE, attachment.mimeType)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                }
-                val destination = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Could not create download")
-                resolver.openInputStream(Uri.parse(attachment.uri))!!.use { input ->
-                    resolver.openOutputStream(destination)!!.use { output -> input.copyTo(output) }
-                }
+                saveAttachmentWithMediaStore(attachment)
             }.onSuccess { _state.update { it.copy(notice = "Saved to Downloads") } }.onFailure(::showFailure)
+        }
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private fun saveAttachmentWithMediaStore(attachment: AttachmentUi) {
+        val resolver = getApplication<Application>().contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, attachment.name)
+            put(MediaStore.Downloads.MIME_TYPE, attachment.mimeType)
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+        }
+        val destination = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Could not create download")
+        resolver.openInputStream(Uri.parse(attachment.uri))!!.use { input ->
+            resolver.openOutputStream(destination)!!.use { output -> input.copyTo(output) }
         }
     }
 
@@ -976,6 +988,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
     private suspend fun startScreenAudio() {
+        if (ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
         val screenTrack = room.localParticipant.getTrackPublication(Track.Source.SCREEN_SHARE)?.track as? LocalVideoTrack ?: return
         stopScreenAudio()
         ScreenAudioCapturer.createFromScreenShareTrack(screenTrack)?.let { capturer ->
@@ -994,7 +1007,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         screenAudioTrack?.let { room.localParticipant.unpublishTrack(it) }
         screenAudioTrack?.dispose()
         screenAudioTrack = null
-        screenAudioCapturer?.releaseAudioResources()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) screenAudioCapturer?.releaseAudioResources()
         screenAudioCapturer = null
     }
 

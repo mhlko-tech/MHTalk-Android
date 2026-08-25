@@ -4,6 +4,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+fun configValue(name: String): String =
+    (providers.gradleProperty(name).orNull ?: System.getenv(name) ?: "")
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+
 android {
     namespace = "com.mhlko.talk"
     compileSdk = 36
@@ -17,6 +22,12 @@ android {
 
         buildConfigField("String", "LIVEKIT_URL", "\"wss://mhtalkremake-utuei6i7.livekit.cloud\"")
         buildConfigField("String", "TOKEN_ENDPOINT", "\"https://mhtalk-token-service.mhlkotalk.workers.dev/livekit/token\"")
+        buildConfigField("String", "SUPABASE_URL", "\"${configValue("MHTALK_SUPABASE_URL")}\"")
+        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"${configValue("MHTALK_SUPABASE_PUBLISHABLE_KEY")}\"")
+        buildConfigField("String", "FIREBASE_PROJECT_ID", "\"${configValue("MHTALK_FIREBASE_PROJECT_ID")}\"")
+        buildConfigField("String", "FIREBASE_APP_ID", "\"${configValue("MHTALK_FIREBASE_APP_ID")}\"")
+        buildConfigField("String", "FIREBASE_API_KEY", "\"${configValue("MHTALK_FIREBASE_API_KEY")}\"")
+        buildConfigField("String", "FIREBASE_SENDER_ID", "\"${configValue("MHTALK_FIREBASE_SENDER_ID")}\"")
     }
 
     signingConfigs {
@@ -84,6 +95,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("io.livekit:livekit-android:2.28.0")
+    implementation(platform("com.google.firebase:firebase-bom:34.17.0"))
+    implementation("com.google.firebase:firebase-messaging")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
