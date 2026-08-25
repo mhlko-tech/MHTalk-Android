@@ -59,6 +59,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.viewinterop.AndroidView
+import com.mhlko.talk.BuildConfig
 import com.mhlko.talk.call.SessionViewModel
 import com.mhlko.talk.data.ConnectionStatus
 import com.mhlko.talk.data.MemberUi
@@ -105,6 +106,14 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     var pendingShareOptions by remember { mutableStateOf<ShareOptions?>(null) }
     if (!state.launchReady) {
         LaunchScreen()
+        return
+    }
+    if (authState !is AuthState.SignedIn) {
+        RequiredSignInScreen(
+            authState = authState,
+            onGoogle = { auth.beginSignIn("google") },
+            onRetry = { appScope.launch { auth.initialize() } },
+        )
         return
     }
     var permissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -396,7 +405,7 @@ private fun LaunchScreen() {
                 Text("M", color = Color.White, fontSize = 60.sp, fontWeight = FontWeight.Black)
             }
             Spacer(Modifier.height(18.dp))
-            Text("MHTalk", color = MHTalkText, fontWeight = FontWeight.ExtraBold, fontSize = 26.sp)
+            Text("MHTalk ${BuildConfig.VERSION_NAME}", color = MHTalkText, fontWeight = FontWeight.ExtraBold, fontSize = 26.sp)
             Spacer(Modifier.height(8.dp))
             CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = MHTalkGreen)
         }
@@ -430,7 +439,7 @@ private fun Header(
             )
         }
         Column(Modifier.padding(start = 12.dp).weight(1f)) {
-            Text(if (state.roomName == null) "MHTalk" else if (state.roomName == "Main") "Main channel" else "Private channel", fontWeight = FontWeight.ExtraBold, fontSize = 21.sp)
+            Text(if (state.roomName == null) "MHTalk ${BuildConfig.VERSION_NAME}" else if (state.roomName == "Main") "Main channel" else "Private channel", fontWeight = FontWeight.ExtraBold, fontSize = 21.sp)
             Text(statusText(state.status), color = statusColor(state.status), fontSize = 12.sp)
         }
         Box {
@@ -863,6 +872,82 @@ private fun PipVideoScreen(track: VideoTrack?, session: SessionViewModel) {
                     }
                 },
             )
+        }
+    }
+}
+
+@Composable
+private fun RequiredSignInScreen(
+    authState: AuthState,
+    onGoogle: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    Box(
+        Modifier.fillMaxSize().background(
+            Brush.verticalGradient(listOf(Color(0xFF11152A), Color(0xFF090C16))),
+        ).padding(26.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth().widthIn(max = 430.dp),
+            shape = RoundedCornerShape(28.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1E32)),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF434A70)),
+        ) {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 34.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(13.dp),
+            ) {
+                Box(
+                    Modifier.size(86.dp).clip(RoundedCornerShape(25.dp)).background(
+                        Brush.linearGradient(listOf(Color(0xFF8B78FF), Color(0xFF5B4ADE))),
+                    ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("M", color = Color.White, fontSize = 50.sp, fontWeight = FontWeight.Black)
+                }
+                Text("MHTalk ${BuildConfig.VERSION_NAME}", color = Color.White, fontSize = 33.sp, fontWeight = FontWeight.Black)
+                Text("Sign in required", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "Your account keeps your profile, friends and room invitations synchronized between phone and PC.",
+                    color = MHTalkMuted,
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp,
+                )
+                when (authState) {
+                    AuthState.Checking -> Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Text("Verifying your account…", color = MHTalkMuted)
+                    }
+                    AuthState.Authenticating -> {
+                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                        Text("Complete sign-in in your browser…", color = MHTalkMuted)
+                    }
+                    else -> {
+                        Button(onClick = onGoogle, modifier = Modifier.fillMaxWidth().height(50.dp)) {
+                            Text("Continue with Google", fontWeight = FontWeight.Bold)
+                        }
+                        if (authState is AuthState.Failed) {
+                            Text(authState.message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                            OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("Try again") }
+                        }
+                        if (authState is AuthState.Unavailable) {
+                            Text("Account service is unavailable. Check your connection and try again.", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                            OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("Try again") }
+                        }
+                    }
+                }
+                Text(
+                    "You must be signed in before MHTalk can open rooms or start a call.",
+                    color = Color(0xFF858EAC),
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                )
+            }
         }
     }
 }
@@ -1559,7 +1644,7 @@ private fun FriendsDialog(
         text = {
             when (authState) {
                 AuthState.Unavailable -> Text("Accounts are ready. Add the Supabase project URL and publishable key to activate them.", color = MHTalkMuted)
-                AuthState.SignedOut, AuthState.Authenticating, is AuthState.Failed -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                AuthState.Checking, AuthState.SignedOut, AuthState.Authenticating, is AuthState.Failed -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Sign in to use the same profile and friends on phone and PC.", color = MHTalkMuted)
                     Button(onGoogle, Modifier.fillMaxWidth(), enabled = authState != AuthState.Authenticating) { Text("Continue with Google") }
                     OutlinedButton(onFacebook, Modifier.fillMaxWidth(), enabled = authState != AuthState.Authenticating) { Text("Continue with Facebook") }

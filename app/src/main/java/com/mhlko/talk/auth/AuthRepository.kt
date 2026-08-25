@@ -34,6 +34,7 @@ data class MHTalkAccount(
 
 sealed interface AuthState {
     data object Unavailable : AuthState
+    data object Checking : AuthState
     data object SignedOut : AuthState
     data object Authenticating : AuthState
     data class SignedIn(val account: MHTalkAccount) : AuthState
@@ -48,7 +49,7 @@ class AuthRepository private constructor(context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val configured = BuildConfig.SUPABASE_URL.isNotBlank() && BuildConfig.SUPABASE_PUBLISHABLE_KEY.isNotBlank()
     private val origin = BuildConfig.TOKEN_ENDPOINT.substringBefore("/livekit/token")
-    private val _state = MutableStateFlow<AuthState>(restoreState())
+    private val _state = MutableStateFlow<AuthState>(if (configured) AuthState.Checking else AuthState.Unavailable)
     val state: StateFlow<AuthState> = _state.asStateFlow()
     private var refreshLoopStarted = false
 
@@ -59,7 +60,10 @@ class AuthRepository private constructor(context: Context) {
     }
 
     suspend fun initialize() {
-        if (!configured) return
+        if (!configured) {
+            _state.value = AuthState.Unavailable
+            return
+        }
         if (!refreshLoopStarted) {
             refreshLoopStarted = true
             scope.launch {
@@ -72,8 +76,13 @@ class AuthRepository private constructor(context: Context) {
                 }
             }
         }
-        if (accessToken() == null && preferences.getString("refresh_token", null) != null) refreshSession()
-        if (accessToken() != null) refreshProfile()
+        _state.value = AuthState.Checking
+        runCatching {
+            if (accessToken() == null && preferences.getString("refresh_token", null) != null) refreshSession()
+            if (accessToken() != null) refreshProfile() else _state.value = AuthState.SignedOut
+        }.onFailure {
+            _state.value = AuthState.Failed(it.message ?: "Could not verify your account")
+        }
     }
 
     fun beginSignIn(provider: String = "google") {
@@ -208,14 +217,6 @@ class AuthRepository private constructor(context: Context) {
                 .putString("refresh_token", body.getString("refresh_token"))
                 .putLong("expires_at", System.currentTimeMillis() + expiresIn * 1000).apply()
         }
-    }
-
-    private fun restoreState(): AuthState {
-        if (!configured) return AuthState.Unavailable
-        val id = preferences.getString("account.id", null) ?: return AuthState.SignedOut
-        val username = preferences.getString("account.username", null) ?: return AuthState.SignedOut
-        val name = preferences.getString("account.name", null) ?: return AuthState.SignedOut
-        return AuthState.SignedIn(MHTalkAccount(id, username, name, preferences.getString("account.avatar", null), preferences.getString("account.bio", null)))
     }
 
     companion object {
