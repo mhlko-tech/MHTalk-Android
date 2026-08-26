@@ -60,9 +60,7 @@ class MainActivity : ComponentActivity() {
                     .setGcmSenderId(BuildConfig.FIREBASE_SENDER_ID).build(),
             )
         }
-        FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-            lifecycleScope.launch { runCatching { SocialRepository.get(this@MainActivity).registerDeviceToken(token) } }
-        }
+        FirebaseMessaging.getInstance().register()
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {

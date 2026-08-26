@@ -15,7 +15,6 @@ import android.graphics.BitmapFactory
 import android.os.Build
 import android.net.Uri
 import android.util.Rational
-import android.util.Base64
 import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,8 +22,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -38,6 +35,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.HelpOutline
+import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
+import androidx.compose.material.icons.automirrored.rounded.Reply
+import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -56,10 +57,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -67,7 +64,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.viewinterop.AndroidView
 import com.mhlko.talk.BuildConfig
-import com.mhlko.talk.R
 import com.mhlko.talk.call.SessionViewModel
 import com.mhlko.talk.data.ConnectionStatus
 import com.mhlko.talk.data.MemberUi
@@ -76,11 +72,9 @@ import com.mhlko.talk.data.UserProfile
 import com.mhlko.talk.data.ChatMessageUi
 import com.mhlko.talk.data.ShareQuality
 import com.mhlko.talk.auth.AuthRepository
-import com.mhlko.talk.auth.AuthRules
 import com.mhlko.talk.auth.AuthState
-import com.mhlko.talk.auth.FriendProfile
-import com.mhlko.talk.auth.IncomingFriendRequest
 import com.mhlko.talk.auth.SocialRepository
+import com.mhlko.talk.ui.auth.RequiredSignInScreen
 import com.mhlko.talk.ui.theme.*
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
@@ -147,8 +141,11 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     val screenShareLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            pendingShareOptions?.let { options -> session.startScreenShare(result.data!!, options.includeMicrophone, options.quality) }
+        val projectionData = result.data
+        if (result.resultCode == Activity.RESULT_OK && projectionData != null) {
+            pendingShareOptions?.let { options ->
+                session.startScreenShare(projectionData, options.includeMicrophone, options.quality)
+            }
         }
     }
     fun withCallPermission(action: () -> Unit) {
@@ -475,7 +472,7 @@ private fun Header(
                 HorizontalDivider()
                 DropdownMenuItem(
                     text = { Text("Help") },
-                    leadingIcon = { Icon(Icons.Rounded.HelpOutline, null) },
+                    leadingIcon = { Icon(Icons.AutoMirrored.Rounded.HelpOutline, null) },
                     onClick = { menuOpen = false; onHelp() },
                 )
                 DropdownMenuItem(
@@ -888,335 +885,6 @@ private fun PipVideoScreen(track: VideoTrack?, session: SessionViewModel) {
     }
 }
 
-private enum class AuthMode { Login, Register, Forgot, Verification, RecoveryCode, Reset }
-
-@Composable
-private fun RequiredSignInScreen(authState: AuthState, auth: AuthRepository, onRetry: () -> Unit) {
-    val context = LocalContext.current
-    var mode by remember { mutableStateOf(AuthMode.Login) }
-    var identifier by remember { mutableStateOf("") }
-    var username by remember { mutableStateOf("") }
-    var displayName by remember { mutableStateOf("") }
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var confirmation by remember { mutableStateOf("") }
-    var verificationCode by remember { mutableStateOf("") }
-    var authAvatar by remember { mutableStateOf<String?>(null) }
-    var onboardingCodeSent by remember { mutableStateOf(false) }
-    var passwordVisible by remember { mutableStateOf(false) }
-    var acceptedTerms by remember { mutableStateOf(false) }
-    var localBusy by remember { mutableStateOf(false) }
-    var localError by remember { mutableStateOf("") }
-    var notice by remember { mutableStateOf("") }
-    var resendSeconds by remember { mutableIntStateOf(0) }
-    val scope = rememberCoroutineScope()
-    val authPhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri != null) runCatching {
-            val mime = context.contentResolver.getType(uri).orEmpty().takeIf { it.startsWith("image/") } ?: "image/jpeg"
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: throw IllegalStateException("Could not read this image")
-            require(bytes.size <= 5 * 1024 * 1024) { "Choose an image that is 5 MB or smaller" }
-            authAvatar = "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
-        }.onFailure { localError = it.message ?: "Could not read this image" }
-    }
-    val busy = localBusy || authState == AuthState.Checking || authState == AuthState.Authenticating
-
-    LaunchedEffect(authState) {
-        when (authState) {
-            is AuthState.AwaitingVerification -> { email = authState.email; mode = AuthMode.Verification }
-            is AuthState.Onboarding -> {
-                email = authState.email; username = authState.username; displayName = authState.displayName
-                authAvatar = authState.avatarUrl; verificationCode = ""; onboardingCodeSent = false
-            }
-            AuthState.PasswordRecovery -> mode = AuthMode.Reset
-            else -> Unit
-        }
-    }
-    LaunchedEffect(resendSeconds) {
-        if (resendSeconds > 0) { delay(1_000); resendSeconds-- }
-    }
-    fun switchMode(next: AuthMode) {
-        auth.clearAuthError(); mode = next; localError = ""; notice = ""; verificationCode = ""
-    }
-    fun perform(block: suspend () -> Unit) {
-        scope.launch {
-            localBusy = true; localError = ""; notice = ""
-            runCatching { block() }.onFailure { localError = it.message ?: "Something went wrong. Try again." }
-            localBusy = false
-        }
-    }
-
-    Box(
-        Modifier.fillMaxSize().background(
-            Brush.verticalGradient(listOf(Color(0xFF11152A), Color(0xFF090C16))),
-        ).padding(26.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Card(
-            modifier = Modifier.fillMaxWidth().widthIn(max = 460.dp),
-            shape = RoundedCornerShape(28.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1E32)),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF434A70)),
-        ) {
-            Column(
-                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 25.dp, vertical = 28.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(13.dp)) {
-                    Box(
-                        Modifier.size(58.dp).clip(RoundedCornerShape(17.dp)).background(
-                            Brush.linearGradient(listOf(Color(0xFF8B78FF), Color(0xFF5B4ADE))),
-                        ), contentAlignment = Alignment.Center,
-                    ) { Text("M", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Black) }
-                    Column {
-                        Text("MHTalk", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Black)
-                        Text("Voice, video and rooms · v${BuildConfig.VERSION_NAME}", color = MHTalkMuted, fontSize = 11.sp)
-                    }
-                }
-                HorizontalDivider(color = Color(0xFF303650))
-
-                if (authState == AuthState.Checking) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                        Text("Restoring your secure session…", color = MHTalkMuted)
-                    }
-                } else if (authState is AuthState.Onboarding) {
-                    androidx.compose.foundation.Image(painterResource(R.drawable.ic_google_logo), null, Modifier.size(32.dp))
-                    Text(
-                        if (onboardingCodeSent) "Verify account creation" else "Finish your MHTalk account",
-                        color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold,
-                    )
-                    if (!onboardingCodeSent) {
-                        Text("Google verified ${authState.email}. Choose how your MHTalk profile will appear.", color = MHTalkMuted, lineHeight = 20.sp)
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                            if (authAvatar?.startsWith("data:image/") == true || authAvatar?.startsWith("http") == true) {
-                                AsyncImage(authAvatar, "Profile photo", Modifier.size(68.dp).clip(CircleShape), contentScale = ContentScale.Crop)
-                            } else {
-                                Box(Modifier.size(68.dp).clip(CircleShape).background(Color(0xFF5B4ADE)), contentAlignment = Alignment.Center) {
-                                    Text(displayName.take(1).ifBlank { "M" }.uppercase(), color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Black)
-                                }
-                            }
-                            Column {
-                                TextButton({ authPhotoPicker.launch(arrayOf("image/*")) }) { Text("Choose profile photo") }
-                                if (!authAvatar.isNullOrBlank()) TextButton({ authAvatar = null }) { Text("Remove photo") }
-                            }
-                        }
-                        OutlinedTextField(authState.email, {}, Modifier.fillMaxWidth(), readOnly = true, label = { Text("Email") })
-                        OutlinedTextField(displayName, { displayName = it.take(60) }, Modifier.fillMaxWidth(), label = { Text("Display name") }, singleLine = true)
-                        OutlinedTextField(username, { username = it.filter { char -> char.isLetterOrDigit() || char == '_' }.take(32) }, Modifier.fillMaxWidth(), label = { Text("Username") }, singleLine = true)
-                        if (localError.isNotBlank()) Text(localError, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                        Button(
-                            onClick = { perform {
-                                require(AuthRules.usernameError(username) == null) { AuthRules.usernameError(username)!! }
-                                require(displayName.isNotBlank()) { "Enter a display name" }
-                                auth.startGoogleOnboarding(); verificationCode = ""; onboardingCodeSent = true; resendSeconds = 60
-                            } }, enabled = !busy, modifier = Modifier.fillMaxWidth().height(49.dp),
-                        ) { if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Send account creation code") }
-                    } else {
-                        Text("Enter the account creation code sent to ${authState.email}.", color = MHTalkMuted, lineHeight = 20.sp)
-                        OutlinedTextField(
-                            verificationCode, { verificationCode = it.filter(Char::isDigit).take(8) }, Modifier.fillMaxWidth(),
-                            label = { Text("Account creation code") }, singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
-                        )
-                        if (localError.isNotBlank()) Text(localError, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                        if (notice.isNotBlank()) Text(notice, color = Color(0xFF8EE5BD), fontSize = 12.sp)
-                        Button(
-                            onClick = { perform { auth.completeGoogleOnboarding(username, displayName, authAvatar, verificationCode) } },
-                            enabled = !busy && verificationCode.length >= 6, modifier = Modifier.fillMaxWidth().height(49.dp),
-                        ) { Text("Verify and enter MHTalk", fontWeight = FontWeight.Bold) }
-                        TextButton(
-                            onClick = { perform { auth.startGoogleOnboarding(); resendSeconds = 60; notice = "A new account creation code was sent." } },
-                            enabled = !busy && resendSeconds == 0,
-                        ) { Text(if (resendSeconds > 0) "Resend in ${resendSeconds}s" else "Resend account creation code") }
-                        TextButton({ onboardingCodeSent = false; localError = ""; notice = "" }) { Text("Edit profile details") }
-                    }
-                    TextButton({ perform { auth.signOut() } }) { Text("Cancel and sign out") }
-                } else if (authState is AuthState.AccountExists) {
-                    Icon(Icons.Rounded.Info, null, tint = Color(0xFFA99CFF), modifier = Modifier.size(48.dp))
-                    Text("Account already exists", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                    Text(authState.message, color = MHTalkMuted, lineHeight = 20.sp)
-                    Text(authState.email, color = Color.White, fontWeight = FontWeight.Bold)
-                    if (localError.isNotBlank()) Text(localError, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                    Button(
-                        onClick = { perform {
-                            auth.requestPasswordReset(authState.email); auth.dismissAccountNotice()
-                            email = authState.email; verificationCode = ""; mode = AuthMode.RecoveryCode
-                            notice = "A password setup code was sent."
-                        } }, enabled = !busy, modifier = Modifier.fillMaxWidth().height(49.dp),
-                    ) { Text(if (authState.passwordEnabled) "Reset password" else "Set a password") }
-                    if (authState.googleLinked) Button(
-                        onClick = { auth.beginSignIn("google") }, enabled = !busy,
-                        modifier = Modifier.fillMaxWidth().height(49.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFF222532)),
-                    ) { androidx.compose.foundation.Image(painterResource(R.drawable.ic_google_logo), null, Modifier.size(20.dp)); Spacer(Modifier.width(10.dp)); Text("Log in using Google") }
-                    TextButton({ auth.dismissAccountNotice(); switchMode(AuthMode.Login) }) { Text("Back to login") }
-                } else if (mode == AuthMode.Verification) {
-                    Icon(Icons.Rounded.MarkEmailRead, null, tint = Color(0xFFA99CFF), modifier = Modifier.size(48.dp))
-                    Text("Verify your email", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                    Text("Enter the verification code sent to $email.", color = MHTalkMuted, lineHeight = 20.sp)
-                    OutlinedTextField(
-                        verificationCode, { verificationCode = it.filter(Char::isDigit).take(8) }, Modifier.fillMaxWidth(),
-                        label = { Text("Verification code") }, singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
-                    )
-                    if (localError.isNotBlank()) Text(localError, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                    if (notice.isNotBlank()) Text(notice, color = Color(0xFF8EE5BD), fontSize = 12.sp)
-                    Button(
-                        onClick = { perform { auth.verifyEmailCode(email, verificationCode, displayName, authAvatar) } },
-                        enabled = !busy && verificationCode.length >= 6, modifier = Modifier.fillMaxWidth().height(48.dp),
-                    ) { Text("Verify and continue") }
-                    Button(
-                        onClick = { perform { auth.resendVerification(email); resendSeconds = 60; notice = "A new verification code was sent." } },
-                        enabled = !busy && resendSeconds == 0, modifier = Modifier.fillMaxWidth().height(48.dp),
-                    ) { Text(if (resendSeconds > 0) "Resend in ${resendSeconds}s" else "Resend verification code") }
-                    TextButton(onClick = { identifier = email; switchMode(AuthMode.Forgot) }) { Text("Already use this email? Set a password") }
-                    TextButton(onClick = { switchMode(AuthMode.Login) }) { Text("Back to login") }
-                } else {
-                    Text(
-                        when (mode) { AuthMode.Login -> "Welcome back"; AuthMode.Register -> "Create your account"; AuthMode.Forgot -> "Reset your password"; AuthMode.RecoveryCode -> "Enter recovery code"; else -> "Choose a new password" },
-                        color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        when (mode) { AuthMode.Login -> "Sign in to continue to MHTalk."; AuthMode.Register -> "One account works on phone and PC."; AuthMode.Forgot -> "Enter your username or email and we’ll send a recovery code."; AuthMode.RecoveryCode -> "Enter the code sent to $email."; else -> "Use at least 10 characters for your new password." },
-                        color = MHTalkMuted, fontSize = 13.sp,
-                    )
-
-                    if (mode == AuthMode.Register) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                            if (authAvatar?.startsWith("data:image/") == true) {
-                                AsyncImage(authAvatar, "Profile photo", Modifier.size(62.dp).clip(CircleShape), contentScale = ContentScale.Crop)
-                            } else {
-                                Box(Modifier.size(62.dp).clip(CircleShape).background(Color(0xFF5B4ADE)), contentAlignment = Alignment.Center) {
-                                    Text(displayName.take(1).ifBlank { "M" }.uppercase(), color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Black)
-                                }
-                            }
-                            Column {
-                                TextButton({ authPhotoPicker.launch(arrayOf("image/*")) }) { Text("Choose profile photo") }
-                                if (!authAvatar.isNullOrBlank()) TextButton({ authAvatar = null }) { Text("Remove photo") }
-                            }
-                        }
-                        OutlinedTextField(username, { username = it.filter { char -> char.isLetterOrDigit() || char == '_' }.take(32) }, Modifier.fillMaxWidth(), label = { Text("Username") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Next))
-                        OutlinedTextField(displayName, { displayName = it.take(60) }, Modifier.fillMaxWidth(), label = { Text("Display name") }, singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next))
-                        OutlinedTextField(email, { email = it }, Modifier.fillMaxWidth(), label = { Text("Email") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next))
-                    }
-                    if (mode == AuthMode.Login || mode == AuthMode.Forgot) {
-                        OutlinedTextField(identifier, { identifier = it }, Modifier.fillMaxWidth(), label = { Text("Username or Email") }, singleLine = true, keyboardOptions = KeyboardOptions(imeAction = if (mode == AuthMode.Forgot) ImeAction.Done else ImeAction.Next))
-                    }
-                    if (mode == AuthMode.RecoveryCode) {
-                        OutlinedTextField(
-                            verificationCode, { verificationCode = it.filter(Char::isDigit).take(8) }, Modifier.fillMaxWidth(),
-                            label = { Text("Recovery code") }, singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
-                        )
-                    }
-                    if (mode == AuthMode.Login || mode == AuthMode.Register || mode == AuthMode.Reset) {
-                        OutlinedTextField(
-                            password, { password = it }, Modifier.fillMaxWidth(), label = { Text("Password") }, singleLine = true,
-                            visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                            trailingIcon = { IconButton({ passwordVisible = !passwordVisible }) { Icon(if (passwordVisible) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, null) } },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = if (mode == AuthMode.Login) ImeAction.Done else ImeAction.Next),
-                        )
-                    }
-                    if (mode == AuthMode.Register || mode == AuthMode.Reset) {
-                        OutlinedTextField(confirmation, { confirmation = it }, Modifier.fillMaxWidth(), label = { Text("Confirm password") }, singleLine = true, visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done))
-                    }
-                    if (mode == AuthMode.Login) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            TextButton({ switchMode(AuthMode.Register) }, contentPadding = PaddingValues(0.dp)) { Text("Register new account", fontSize = 12.sp) }
-                            TextButton({ switchMode(AuthMode.Forgot) }, contentPadding = PaddingValues(0.dp)) { Text("Forgot password?", fontSize = 12.sp) }
-                        }
-                    }
-                    if (mode == AuthMode.Register) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                            Checkbox(acceptedTerms, { acceptedTerms = it })
-                            Column(Modifier.padding(top = 7.dp)) {
-                                Text("I agree to the:", color = MHTalkMuted, fontSize = 12.sp)
-                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    TextButton(
-                                        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://mhtalk-token-service.mhlkotalk.workers.dev/terms"))) },
-                                        contentPadding = PaddingValues(0.dp),
-                                    ) { Text("Terms of Service", fontSize = 12.sp) }
-                                    Text("and", color = MHTalkMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 13.dp))
-                                    TextButton(
-                                        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://mhtalk-token-service.mhlkotalk.workers.dev/privacy"))) },
-                                        contentPadding = PaddingValues(0.dp),
-                                    ) { Text("Privacy Policy", fontSize = 12.sp) }
-                                }
-                            }
-                        }
-                    }
-
-                    val displayedError = localError.ifBlank { (authState as? AuthState.Failed)?.message.orEmpty() }
-                    if (displayedError.isNotBlank()) Text(displayedError, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                    if (notice.isNotBlank()) Text(notice, color = Color(0xFF8EE5BD), fontSize = 12.sp)
-                    if (authState == AuthState.Unavailable) {
-                        Text("Account service is unavailable. Check your connection and try again.", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                        OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("Try again") }
-                    }
-
-                    Button(
-                        enabled = !busy && (mode != AuthMode.RecoveryCode || verificationCode.length >= 6),
-                        modifier = Modifier.fillMaxWidth().height(49.dp),
-                        onClick = {
-                            perform {
-                                when (mode) {
-                                    AuthMode.Login -> auth.login(identifier, password)
-                                    AuthMode.Register -> {
-                                        require(AuthRules.usernameError(username) == null) { AuthRules.usernameError(username)!! }
-                                        require(AuthRules.passwordError(password) == null) { AuthRules.passwordError(password)!! }
-                                        require(password == confirmation) { "Passwords do not match" }
-                                        require(acceptedTerms) { "Accept the Terms and Privacy Policy to continue" }
-                                        require(auth.usernameAvailable(username)) { "Username is unavailable" }
-                                        auth.register(username, displayName, email, password)
-                                    }
-                                    AuthMode.Forgot -> {
-                                        auth.requestPasswordReset(identifier); email = identifier.trim(); verificationCode = ""
-                                        mode = AuthMode.RecoveryCode; notice = "If an account matches this information, a recovery code has been sent."
-                                    }
-                                    AuthMode.RecoveryCode -> auth.verifyPasswordRecoveryCode(email, verificationCode)
-                                    AuthMode.Reset -> {
-                                        require(AuthRules.passwordError(password) == null) { AuthRules.passwordError(password)!! }
-                                        require(password == confirmation) { "Passwords do not match" }
-                                        auth.completePasswordRecovery(password)
-                                    }
-                                    else -> Unit
-                                }
-                            }
-                        }
-                    ) {
-                        if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
-                        else Text(when (mode) { AuthMode.Login -> "Login"; AuthMode.Register -> "Create account"; AuthMode.Forgot -> "Send recovery code"; AuthMode.RecoveryCode -> "Verify code"; else -> "Save new password" }, fontWeight = FontWeight.Bold)
-                    }
-
-                    if (mode == AuthMode.Login) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { HorizontalDivider(Modifier.weight(1f), color = Color(0xFF343A57)); Text("  OR  ", color = MHTalkMuted, fontSize = 10.sp); HorizontalDivider(Modifier.weight(1f), color = Color(0xFF343A57)) }
-                        Button(
-                            onClick = { auth.beginSignIn("google") }, enabled = !busy,
-                            modifier = Modifier.fillMaxWidth().height(49.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFF222532)),
-                        ) { androidx.compose.foundation.Image(painterResource(R.drawable.ic_google_logo), null, Modifier.size(20.dp)); Spacer(Modifier.width(10.dp)); Text("Log in using Google", fontWeight = FontWeight.Bold) }
-                    } else if (mode != AuthMode.Reset) {
-                        TextButton({ switchMode(if (mode == AuthMode.RecoveryCode) AuthMode.Forgot else AuthMode.Login) }) { Text(if (mode == AuthMode.RecoveryCode) "Use another email" else "Back to login") }
-                    } else {
-                        TextButton({ perform { auth.cancelPasswordRecovery() } }) { Text("Cancel") }
-                    }
-                }
-                HorizontalDivider(color = Color(0xFF303650))
-                Text(
-                    "Protected sign-in · Your password is never stored by MHTalk",
-                    color = Color(0xFF858EAC),
-                    fontSize = 10.sp,
-                    lineHeight = 17.sp,
-                )
-            }
-        }
-    }
-}
 
 /**
  * LiveKit's publication dimensions can lag behind a phone rotation. This sink measures every
@@ -1413,7 +1081,7 @@ private fun RoomChat(state: SessionUiState, session: SessionViewModel) {
                                                 openAttachment(context, attachment.uri, attachment.mimeType)
                                             },
                                         ) {
-                                            Icon(Icons.Rounded.InsertDriveFile, null, tint = MHTalkPurple)
+                                            Icon(Icons.AutoMirrored.Rounded.InsertDriveFile, null, tint = MHTalkPurple)
                                             Column(Modifier.padding(start = 8.dp).weight(1f)) {
                                                 Text(attachment.name, maxLines = 2)
                                                 Text(formatBytes(attachment.size), color = MHTalkMuted, fontSize = 11.sp)
@@ -1503,7 +1171,7 @@ private fun RoomChat(state: SessionUiState, session: SessionViewModel) {
                     onClick = submitMessage,
                     enabled = text.isNotBlank(),
                     modifier = Modifier.size(48.dp).clip(CircleShape).background(MHTalkPurple),
-                ) { Icon(Icons.Rounded.Send, "Send") }
+                ) { Icon(Icons.AutoMirrored.Rounded.Send, "Send") }
             }
             }
         }
@@ -1603,7 +1271,7 @@ private fun MessageActionsSheet(
             }
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                MessageAction(Icons.Rounded.Reply, "Reply", onReply)
+                MessageAction(Icons.AutoMirrored.Rounded.Reply, "Reply", onReply)
                 MessageAction(Icons.Rounded.ContentCopy, "Copy", onCopy)
                 if (message.mine && message.attachment == null) MessageAction(Icons.Rounded.Edit, "Edit", onEdit)
                 if (message.mine) MessageAction(Icons.Rounded.Delete, "Delete", onDelete, destructive = true)
@@ -1767,325 +1435,8 @@ private fun formatBytes(size: Long): String = when {
     else -> "${size / (1024 * 1024)} MB"
 }
 
-@Composable
-private fun ProfileDialog(
-    profile: UserProfile,
-    onDismiss: () -> Unit,
-    onSave: (UserProfile) -> Unit,
-    onChoosePhoto: () -> Unit,
-    onRemovePhoto: () -> Unit,
-) {
-    var name by remember(profile.name) { mutableStateOf(profile.name) }
-    var bio by remember(profile.bio) { mutableStateOf(profile.bio) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Edit profile") },
-        text = {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                if (!isImageAvatar(profile.avatar)) {
-                    Box(Modifier.size(92.dp).clip(CircleShape).background(MHTalkPurple), contentAlignment = Alignment.Center) {
-                        Text(profile.avatar.take(1).ifBlank { name.take(1) }.uppercase(), fontSize = 28.sp, fontWeight = FontWeight.Black)
-                    }
-                } else {
-                    AsyncImage(model = profile.avatar, contentDescription = "Profile photo", contentScale = ContentScale.Crop, modifier = Modifier.size(92.dp).clip(CircleShape))
-                }
-                Row {
-                    TextButton(onChoosePhoto) { Text("Choose photo") }
-                    if (profile.avatar.isNotBlank()) TextButton(onRemovePhoto) { Text("Remove") }
-                }
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it.take(32) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Name") },
-                    singleLine = true,
-                )
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = bio,
-                    onValueChange = { bio = it.take(160) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Bio") },
-                    minLines = 2,
-                    maxLines = 4,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSave(profile.copy(name = name.trim().ifBlank { "Me" }, bio = bio.trim())) }) {
-                Text("Save")
-            }
-        },
-        dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
-    )
-}
 
-@Composable
-private fun ProfileCropDialog(
-    uri: Uri,
-    onDismiss: () -> Unit,
-    onUse: (Float, Float, Float) -> Unit,
-) {
-    val context = LocalContext.current
-    val density = LocalDensity.current
-    val mimeType = remember(uri) { context.contentResolver.getType(uri).orEmpty() }
-    val animated = mimeType.equals("image/gif", ignoreCase = true)
-    val dimensions = remember(uri) {
-        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
-        options.outWidth.coerceAtLeast(1) to options.outHeight.coerceAtLeast(1)
-    }
-    var zoom by remember(uri) { mutableFloatStateOf(1f) }
-    var offsetX by remember(uri) { mutableFloatStateOf(0f) }
-    var offsetY by remember(uri) { mutableFloatStateOf(0f) }
-    val previewSize = 230.dp
-    val previewPx = with(density) { previewSize.toPx() }
-    val baseScale = maxOf(previewPx / dimensions.first, previewPx / dimensions.second)
-    val translationX = offsetX * ((dimensions.first * baseScale * zoom - previewPx).coerceAtLeast(0f) / 2f)
-    val translationY = offsetY * ((dimensions.second * baseScale * zoom - previewPx).coerceAtLeast(0f) / 2f)
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Crop profile photo") },
-        text = {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(
-                    Modifier.size(previewSize).clip(CircleShape).background(Color(0xFF101422)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    AsyncImage(
-                        model = uri,
-                        contentDescription = "Exact avatar preview",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize().graphicsLayer {
-                            scaleX = zoom
-                            scaleY = zoom
-                            this.translationX = translationX
-                            this.translationY = translationY
-                        },
-                    )
-                }
-                Spacer(Modifier.height(16.dp))
-                if (animated) {
-                    Text("Animated image · the centered circular crop is preserved.", color = MHTalkMuted, fontSize = 12.sp)
-                } else {
-                    Text("Zoom · ${(zoom * 100).toInt()}%", modifier = Modifier.fillMaxWidth(), color = MHTalkMuted)
-                    Slider(zoom, { zoom = it }, valueRange = 1f..3f)
-                    Text("Move left / right", modifier = Modifier.fillMaxWidth(), color = MHTalkMuted)
-                    Slider(offsetX, { offsetX = it }, valueRange = -1f..1f)
-                    Text("Move up / down", modifier = Modifier.fillMaxWidth(), color = MHTalkMuted)
-                    Slider(offsetY, { offsetY = it }, valueRange = -1f..1f)
-                }
-            }
-        },
-        confirmButton = { TextButton({ onUse(zoom, offsetX, offsetY) }) { Text("Use this photo") } },
-        dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun FriendsDialog(
-    authState: AuthState,
-    friends: List<FriendProfile>,
-    requests: List<IncomingFriendRequest>,
-    loading: Boolean,
-    error: String?,
-    onDismiss: () -> Unit,
-    onGoogle: () -> Unit,
-    onFacebook: () -> Unit,
-    onSignOut: () -> Unit,
-    onSearch: suspend (String) -> List<FriendProfile>,
-    onAdd: suspend (String) -> Unit,
-    onRespond: suspend (String, Boolean) -> Unit,
-    onInvite: (String) -> Unit,
-) {
-    val scope = rememberCoroutineScope()
-    var query by remember { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<FriendProfile>>(emptyList()) }
-    var busy by remember { mutableStateOf<String?>(null) }
-    var localError by remember { mutableStateOf<String?>(null) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Friends") },
-        text = {
-            when (authState) {
-                AuthState.Unavailable -> Text("Accounts are ready. Add the Supabase project URL and publishable key to activate them.", color = MHTalkMuted)
-                AuthState.Checking, AuthState.SignedOut, AuthState.Authenticating, AuthState.PasswordRecovery,
-                is AuthState.AwaitingVerification, is AuthState.AccountExists, is AuthState.Onboarding,
-                is AuthState.Failed -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Sign in to use the same profile and friends on phone and PC.", color = MHTalkMuted)
-                    Button(onGoogle, Modifier.fillMaxWidth(), enabled = authState != AuthState.Authenticating) { Text("Continue with Google") }
-                    OutlinedButton(onFacebook, Modifier.fillMaxWidth(), enabled = authState != AuthState.Authenticating) { Text("Continue with Facebook") }
-                    if (authState is AuthState.Failed) Text(authState.message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                }
-                is AuthState.SignedIn -> LazyColumn(
-                    Modifier.heightIn(max = 570.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    item {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            SocialAvatar(authState.account.avatarUrl, authState.account.displayName)
-                            Column(Modifier.padding(start = 10.dp).weight(1f)) {
-                                Text(authState.account.displayName, fontWeight = FontWeight.Bold)
-                                Text("@${authState.account.username}", color = MHTalkMuted, fontSize = 12.sp)
-                            }
-                            TextButton(onSignOut) { Text("Sign out") }
-                        }
-                    }
-                    if (requests.isNotEmpty()) {
-                        item { Text("FRIEND REQUESTS", color = MHTalkMuted, fontWeight = FontWeight.Bold, fontSize = 11.sp) }
-                        items(requests, key = { it.requestId }) { request ->
-                            SocialPerson(request.profile) {
-                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    TextButton(onClick = { scope.launch { onRespond(request.requestId, true) } }) { Text("Accept") }
-                                    IconButton(onClick = { scope.launch { onRespond(request.requestId, false) } }) { Icon(Icons.Rounded.Close, "Decline") }
-                                }
-                            }
-                        }
-                    }
-                    item {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedTextField(
-                                value = query,
-                                onValueChange = { query = it },
-                                modifier = Modifier.weight(1f),
-                                label = { Text("Name or @username") },
-                                singleLine = true,
-                            )
-                            IconButton(
-                                enabled = query.trim().length >= 2 && busy != "search",
-                                onClick = {
-                                    busy = "search"
-                                    scope.launch {
-                                        runCatching { onSearch(query.trim()) }
-                                            .onSuccess { results = it }
-                                            .onFailure { localError = it.message }
-                                        busy = null
-                                    }
-                                },
-                            ) { Icon(Icons.Rounded.Search, "Search") }
-                        }
-                    }
-                    items(results, key = { "search-${it.id}" }) { profile ->
-                        SocialPerson(profile) {
-                            TextButton(
-                                enabled = !profile.isFriend && busy != profile.id,
-                                onClick = {
-                                    busy = profile.id
-                                    scope.launch {
-                                        runCatching { onAdd(profile.id) }
-                                            .onSuccess { results = results.filterNot { it.id == profile.id } }
-                                            .onFailure { localError = it.message }
-                                        busy = null
-                                    }
-                                },
-                            ) { Text(if (profile.isFriend) "Friends" else "Add") }
-                        }
-                    }
-                    item { Text("YOUR FRIENDS", color = MHTalkMuted, fontWeight = FontWeight.Bold, fontSize = 11.sp) }
-                    if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-                    if (!loading && friends.isEmpty()) item { Text("No friends yet. Search by name or username.", color = MHTalkMuted) }
-                    items(friends, key = FriendProfile::id) { friend ->
-                        SocialPerson(friend, showPresence = true) {
-                            Button(onClick = { onInvite(friend.id) }, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 7.dp)) { Text("Invite") }
-                        }
-                    }
-                    (localError ?: error)?.let { message -> item { Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) } }
-                }
-            }
-        },
-        confirmButton = { TextButton(onDismiss) { Text("Close") } },
-    )
-}
-
-@Composable
-private fun SocialPerson(profile: FriendProfile, showPresence: Boolean = false, action: @Composable () -> Unit) {
-    Surface(color = Color(0xFF23283D), shape = RoundedCornerShape(14.dp)) {
-        Row(Modifier.fillMaxWidth().padding(9.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box {
-                SocialAvatar(profile.avatarUrl, profile.displayName)
-                if (showPresence) Box(
-                    Modifier.align(Alignment.BottomEnd).size(11.dp).clip(CircleShape)
-                        .background(if (profile.online) MHTalkGreen else Color(0xFF747B92)),
-                )
-            }
-            Column(Modifier.padding(start = 10.dp).weight(1f)) {
-                Text(profile.displayName, fontWeight = FontWeight.Bold, maxLines = 1)
-                Text(if (showPresence) "${if (profile.online) "Online" else "Offline"} · @${profile.username}" else "@${profile.username}", color = MHTalkMuted, fontSize = 11.sp, maxLines = 1)
-            }
-            action()
-        }
-    }
-}
-
-@Composable
-private fun SocialAvatar(url: String?, name: String) {
-    if (!url.isNullOrBlank()) AsyncImage(url, name, contentScale = ContentScale.Crop, modifier = Modifier.size(42.dp).clip(CircleShape))
-    else Box(Modifier.size(42.dp).clip(CircleShape).background(MHTalkPurple), contentAlignment = Alignment.Center) {
-        Text(name.take(1).uppercase(), fontWeight = FontWeight.Black)
-    }
-}
-
-@Composable
-private fun SettingsDialog(
-    state: SessionUiState,
-    onDismiss: () -> Unit,
-    onOutput: (Int) -> Unit,
-    onTestSpeaker: () -> Unit,
-    onSwitchCamera: () -> Unit,
-    onMessageSounds: (Boolean) -> Unit,
-    onCameraSounds: (Boolean) -> Unit,
-    onScreenSounds: (Boolean) -> Unit,
-    onScreenPrivacy: (Boolean) -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Settings") },
-        text = {
-            LazyColumn(Modifier.heightIn(max = 510.dp)) {
-                item { Column {
-                Text("Speaker", fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Text("Output level · ${state.outputLevel}%", color = MHTalkMuted)
-                Slider(
-                    value = state.outputLevel.toFloat(),
-                    onValueChange = { onOutput(it.toInt()) },
-                    valueRange = 0f..100f,
-                )
-                OutlinedButton(onTestSpeaker, Modifier.fillMaxWidth()) { Text("Test speaker") }
-                Spacer(Modifier.height(18.dp))
-                Text("Camera", fontWeight = FontWeight.Bold)
-                Text("Android uses the selected system camera.", color = MHTalkMuted, fontSize = 12.sp)
-                OutlinedButton(
-                    onClick = onSwitchCamera,
-                    enabled = state.cameraEnabled,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Switch front / back") }
-                Spacer(Modifier.height(18.dp))
-                Text("Event sounds", fontWeight = FontWeight.Bold)
-                SettingSwitch("New messages", "A soft sound when someone sends a message.", state.messageSoundsEnabled, onMessageSounds)
-                SettingSwitch("Camera activity", "A sound when a member starts their camera.", state.cameraSoundsEnabled, onCameraSounds)
-                SettingSwitch("Screen-share activity", "A sound when a member starts sharing their screen.", state.screenShareSoundsEnabled, onScreenSounds)
-                Spacer(Modifier.height(18.dp))
-                Text("Screen-share privacy", fontWeight = FontWeight.Bold)
-                SettingSwitch("Keep notification protection", "Keep Android's privacy protection enabled while sharing. Android may still control this on some devices.", state.screenSharePrivacyEnabled, onScreenPrivacy)
-                } }
-            }
-        },
-        confirmButton = { TextButton(onDismiss) { Text("Done") } },
-    )
-}
-
-@Composable
-private fun SettingSwitch(title: String, detail: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 14.sp)
-            Text(detail, color = MHTalkMuted, fontSize = 11.sp)
-        }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
 
 @Composable
 private fun HelpDialog(onDismiss: () -> Unit) {
@@ -2138,15 +1489,6 @@ private fun PrivateRoomSheet(onDismiss: () -> Unit, onCreate: () -> Unit, onJoin
             OutlinedButton({ onJoin(code) }, Modifier.fillMaxWidth().height(52.dp), enabled = code.isNotBlank()) { Text("Join private room", fontWeight = FontWeight.Bold) }
         }
     }
-}
-
-private fun isImageAvatar(value: String): Boolean {
-    val normalized = value.lowercase()
-    return normalized.startsWith("data:image/") ||
-        normalized.startsWith("content://") ||
-        normalized.startsWith("file://") ||
-        normalized.startsWith("http://") ||
-        normalized.startsWith("https://")
 }
 
 private fun statusText(status: ConnectionStatus) = when (status) {

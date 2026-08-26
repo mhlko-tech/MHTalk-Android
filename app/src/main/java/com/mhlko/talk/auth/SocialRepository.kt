@@ -86,9 +86,7 @@ class SocialRepository private constructor(context: Context) {
             )
             connectPresence()
             if (FirebaseApp.getApps(appContext).isNotEmpty()) {
-                FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-                    scope.launch { runCatching { registerDeviceToken(token) } }
-                }
+                FirebaseMessaging.getInstance().register()
             }
         }.onFailure { _state.value = _state.value.copy(loading = false, error = it.message ?: "Could not load friends") }
     }

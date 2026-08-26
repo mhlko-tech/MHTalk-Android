@@ -599,8 +599,17 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
         }
         val destination = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Could not create download")
-        resolver.openInputStream(Uri.parse(attachment.uri))!!.use { input ->
-            resolver.openOutputStream(destination)!!.use { output -> input.copyTo(output) }
+        try {
+            val input = resolver.openInputStream(Uri.parse(attachment.uri))
+                ?: error("Could not open the attachment")
+            val output = resolver.openOutputStream(destination)
+                ?: error("Could not open the Downloads destination")
+            input.use { source ->
+                output.use { destinationStream -> source.copyTo(destinationStream) }
+            }
+        } catch (error: Throwable) {
+            resolver.delete(destination, null, null)
+            throw error
         }
     }
 

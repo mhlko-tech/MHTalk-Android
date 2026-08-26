@@ -20,8 +20,12 @@ import kotlinx.coroutines.launch
 class MHTalkMessagingService : FirebaseMessagingService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    override fun onNewToken(token: String) {
-        scope.launch { runCatching { SocialRepository.get(applicationContext).registerDeviceToken(token) } }
+    override fun onRegistered(installationId: String) {
+        scope.launch {
+            runCatching {
+                SocialRepository.get(applicationContext).registerDeviceToken(installationId)
+            }
+        }
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
