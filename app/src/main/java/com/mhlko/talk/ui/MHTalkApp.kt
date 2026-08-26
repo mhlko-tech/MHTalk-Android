@@ -13,6 +13,7 @@ import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.graphics.BitmapFactory
 import android.os.Build
+import android.provider.Settings
 import android.net.Uri
 import android.util.Rational
 import android.widget.MediaController
@@ -114,23 +115,42 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     val updateInstaller = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { /* A successful install replaces this process; cancellation keeps the gate visible. */ }
+    fun installDownloadedUpdate() {
+        val path = state.updateApkPath ?: return
+        val apk = File(path)
+        if (!apk.isFile) {
+            session.retryUpdateCheck()
+            return
+        }
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", apk)
+        updateInstaller.launch(
+            Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+        )
+    }
+    val unknownSourcesLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || context.packageManager.canRequestPackageInstalls()) {
+            installDownloadedUpdate()
+        }
+    }
     if (!state.launchReady) {
         LaunchScreen(
             state = state,
             onRetry = session::retryUpdateCheck,
             onInstall = {
-                val path = state.updateApkPath ?: return@LaunchScreen
-                val apk = File(path)
-                if (!apk.isFile) {
-                    session.retryUpdateCheck()
-                    return@LaunchScreen
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+                    unknownSourcesLauncher.launch(
+                        Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:${context.packageName}"),
+                        ),
+                    )
+                } else {
+                    installDownloadedUpdate()
                 }
-                val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", apk)
-                updateInstaller.launch(
-                    Intent(Intent.ACTION_VIEW)
-                        .setDataAndType(uri, "application/vnd.android.package-archive")
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                )
             },
         )
         return
