@@ -23,19 +23,30 @@ import com.mhlko.talk.data.UserProfile
 import com.mhlko.talk.data.isImageAvatar
 import com.mhlko.talk.ui.theme.MHTalkMuted
 import com.mhlko.talk.ui.theme.MHTalkPurple
+import kotlinx.coroutines.delay
 
 @Composable
 internal fun ProfileDialog(
     profile: UserProfile,
     onDismiss: () -> Unit,
-    onSave: (UserProfile) -> Unit,
+    onChange: (UserProfile) -> Unit,
     onChoosePhoto: () -> Unit,
     onRemovePhoto: () -> Unit,
 ) {
     var name by remember(profile.name) { mutableStateOf(profile.name) }
     var bio by remember(profile.bio) { mutableStateOf(profile.bio) }
+    var lastEmitted by remember { mutableStateOf(profile.name to profile.bio) }
+    fun currentProfile() = profile.copy(name = name.trim().ifBlank { profile.name }, bio = bio.trim())
+    LaunchedEffect(name, bio) {
+        delay(350)
+        val signature = name to bio
+        if (name.isNotBlank() && signature != lastEmitted) {
+            lastEmitted = signature
+            onChange(currentProfile())
+        }
+    }
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (name.isNotBlank()) onChange(currentProfile()); onDismiss() },
         title = { Text("Edit profile") },
         text = {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -69,12 +80,8 @@ internal fun ProfileDialog(
                 )
             }
         },
-        confirmButton = {
-            TextButton(onClick = { onSave(profile.copy(name = name.trim().ifBlank { "Me" }, bio = bio.trim())) }) {
-                Text("Save")
-            }
-        },
-        dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = { if (name.isNotBlank()) onChange(currentProfile()); onDismiss() }) { Text("Close") } },
     )
 }
 
@@ -82,7 +89,7 @@ internal fun ProfileDialog(
 internal fun ProfileCropDialog(
     uri: Uri,
     onDismiss: () -> Unit,
-    onUse: (Float, Float, Float) -> Unit,
+    onUse: (Float, Float, Float, Int) -> Unit,
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -96,6 +103,7 @@ internal fun ProfileCropDialog(
     var zoom by remember(uri) { mutableFloatStateOf(1f) }
     var offsetX by remember(uri) { mutableFloatStateOf(0f) }
     var offsetY by remember(uri) { mutableFloatStateOf(0f) }
+    var rotation by remember(uri) { mutableIntStateOf(0) }
     val previewSize = 230.dp
     val previewPx = with(density) { previewSize.toPx() }
     val baseScale = maxOf(previewPx / dimensions.first, previewPx / dimensions.second)
@@ -108,7 +116,7 @@ internal fun ProfileCropDialog(
         text = {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(
-                    Modifier.size(previewSize).clip(CircleShape).background(Color(0xFF101422)),
+                    Modifier.size(previewSize).background(Color(0xFF101422)),
                     contentAlignment = Alignment.Center,
                 ) {
                     AsyncImage(
@@ -120,6 +128,7 @@ internal fun ProfileCropDialog(
                             scaleY = zoom
                             this.translationX = translationX
                             this.translationY = translationY
+                            rotationZ = rotation.toFloat()
                         },
                     )
                 }
@@ -134,9 +143,10 @@ internal fun ProfileCropDialog(
                     Text("Move up / down", modifier = Modifier.fillMaxWidth(), color = MHTalkMuted)
                     Slider(offsetY, { offsetY = it }, valueRange = -1f..1f)
                 }
+                OutlinedButton(onClick = { rotation = (rotation + 90) % 360; offsetX = 0f; offsetY = 0f }) { Text("↻  Rotate") }
             }
         },
-        confirmButton = { TextButton({ onUse(zoom, offsetX, offsetY) }) { Text("Use this photo") } },
+        confirmButton = { Button({ onUse(zoom, offsetX, offsetY, rotation) }) { Text("Next") } },
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
     )
 }

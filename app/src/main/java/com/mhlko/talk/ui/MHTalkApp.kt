@@ -255,7 +255,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     if (showProfile) ProfileDialog(
         profile = state.localProfile,
         onDismiss = { showProfile = false },
-        onSave = {
+        onChange = {
             session.saveProfile(it)
             if (authState is AuthState.SignedIn) appScope.launch {
                 runCatching { auth.updateProfile(it.name, it.bio) }
@@ -335,8 +335,8 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         ProfileCropDialog(
             uri = uri,
             onDismiss = { pendingProfilePhoto = null },
-            onUse = { zoom, x, y ->
-                session.chooseProfilePhoto(uri, zoom, x, y)
+            onUse = { zoom, x, y, rotation ->
+                session.chooseProfilePhoto(uri, zoom, x, y, rotation)
                 pendingProfilePhoto = null
             },
         )

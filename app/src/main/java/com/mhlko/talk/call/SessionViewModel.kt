@@ -12,6 +12,7 @@ import android.media.ToneGenerator
 import android.media.MediaRecorder
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.provider.OpenableColumns
 import android.provider.MediaStore
 import android.content.ContentValues
@@ -676,7 +677,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         syncParticipants()
     }
 
-    fun chooseProfilePhoto(uri: Uri, zoom: Float = 1f, offsetX: Float = 0f, offsetY: Float = 0f) {
+    fun chooseProfilePhoto(uri: Uri, zoom: Float = 1f, offsetX: Float = 0f, offsetY: Float = 0f, rotation: Int = 0) {
         viewModelScope.launch {
             runCatching {
                 val resolver = getApplication<Application>().contentResolver
@@ -696,17 +697,23 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     val options = BitmapFactory.Options().apply { inSampleSize = sample }
                     val source = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
                         ?: error("Could not decode profile image")
-                    val side = (minOf(source.width, source.height) / zoom.coerceIn(1f, 3f)).toInt().coerceAtLeast(1)
-                    val centerX = source.width / 2f - offsetX.coerceIn(-1f, 1f) * (source.width - side) / 2f
-                    val centerY = source.height / 2f - offsetY.coerceIn(-1f, 1f) * (source.height - side) / 2f
-                    val left = (centerX - side / 2f).toInt().coerceIn(0, source.width - side)
-                    val top = (centerY - side / 2f).toInt().coerceIn(0, source.height - side)
-                    val cropped = Bitmap.createBitmap(source, left, top, side, side)
-                    val avatar = Bitmap.createScaledBitmap(cropped, 96, 96, true)
+                    val normalizedRotation = ((rotation % 360) + 360) % 360
+                    val oriented = if (normalizedRotation == 0) source else Bitmap.createBitmap(
+                        source, 0, 0, source.width, source.height,
+                        Matrix().apply { postRotate(normalizedRotation.toFloat()) }, true,
+                    )
+                    val side = (minOf(oriented.width, oriented.height) / zoom.coerceIn(1f, 3f)).toInt().coerceAtLeast(1)
+                    val centerX = oriented.width / 2f - offsetX.coerceIn(-1f, 1f) * (oriented.width - side) / 2f
+                    val centerY = oriented.height / 2f - offsetY.coerceIn(-1f, 1f) * (oriented.height - side) / 2f
+                    val left = (centerX - side / 2f).toInt().coerceIn(0, oriented.width - side)
+                    val top = (centerY - side / 2f).toInt().coerceIn(0, oriented.height - side)
+                    val cropped = Bitmap.createBitmap(oriented, left, top, side, side)
+                    val avatar = Bitmap.createScaledBitmap(cropped, 320, 320, true)
                     val output = ByteArrayOutputStream()
-                    avatar.compress(Bitmap.CompressFormat.JPEG, 52, output)
+                    avatar.compress(Bitmap.CompressFormat.JPEG, 86, output)
                     if (avatar !== cropped) avatar.recycle()
-                    if (cropped !== source) cropped.recycle()
+                    if (cropped !== oriented) cropped.recycle()
+                    if (oriented !== source) oriented.recycle()
                     source.recycle()
                     "data:image/jpeg;base64,${Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)}"
                 }
