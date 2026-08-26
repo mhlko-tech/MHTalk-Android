@@ -155,8 +155,16 @@ class AuthRepository private constructor(context: Context) {
             updateProfile(displayName, "", avatar)
     }
 
-    suspend fun verifyPasswordRecoveryCode(email: String, code: String) = withContext(Dispatchers.IO) {
-        verifyOtp(email, code, "recovery")
+    suspend fun verifyPasswordRecoveryCode(identifier: String, code: String) = withContext(Dispatchers.IO) {
+        val value = gatewayPost(
+            "/auth/verify-recovery",
+            JSONObject().put("identifier", identifier.trim()).put("code", code.trim()),
+        )
+        storeTokens(
+            value.getString("access_token"),
+            value.getString("refresh_token"),
+            value.optLong("expires_in", 3600),
+        )
         _state.value = AuthState.PasswordRecovery
     }
 
@@ -257,7 +265,7 @@ class AuthRepository private constructor(context: Context) {
         _state.value = AuthState.Authenticating
         val url = Uri.parse(BuildConfig.SUPABASE_URL.trimEnd('/') + "/auth/v1/authorize").buildUpon()
             .appendQueryParameter("provider", provider)
-            .appendQueryParameter("redirect_to", "mhtalk://auth/callback")
+            .appendQueryParameter("redirect_to", "$origin/auth/complete")
             .appendQueryParameter("code_challenge", challenge)
             .appendQueryParameter("code_challenge_method", "s256")
             .build()
@@ -328,9 +336,9 @@ class AuthRepository private constructor(context: Context) {
         }
     }
 
-    suspend fun updateProfile(displayName: String, bio: String, avatar: String? = null) = withContext(Dispatchers.IO) {
-        val token = accessToken() ?: return@withContext
-        val account = (_state.value as? AuthState.SignedIn)?.account ?: return@withContext
+    suspend fun updateProfile(displayName: String, bio: String, avatar: String? = null): String? = withContext(Dispatchers.IO) {
+        val token = accessToken() ?: return@withContext null
+        val account = (_state.value as? AuthState.SignedIn)?.account ?: return@withContext null
         val avatarUrl = when {
             avatar == null -> null
             avatar.startsWith("data:image/") -> uploadAvatar(account.id, avatar, token)
@@ -346,6 +354,7 @@ class AuthRepository private constructor(context: Context) {
             if (!response.isSuccessful) throw IllegalStateException(runCatching { JSONObject(text).optString("error") }.getOrNull()?.takeIf(String::isNotBlank) ?: "Could not update profile")
         }
         refreshProfile()
+        avatarUrl ?: (_state.value as? AuthState.SignedIn)?.account?.avatarUrl
     }
 
     private fun uploadAvatar(userId: String, dataUrl: String, token: String): String {

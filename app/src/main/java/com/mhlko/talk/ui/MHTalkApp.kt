@@ -10,6 +10,8 @@ import android.content.ClipboardManager
 import android.media.projection.MediaProjectionManager
 import android.media.projection.MediaProjectionConfig
 import android.content.pm.PackageManager
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.media.MediaPlayer
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -19,6 +21,7 @@ import android.util.Rational
 import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -53,6 +56,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -210,7 +214,8 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     var showHelp by remember { mutableStateOf(false) }
     var shareOptionsOpen by remember { mutableStateOf(false) }
     var pendingProfilePhoto by remember { mutableStateOf<Uri?>(null) }
-    val profilePhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+    var cropSubmitted by remember { mutableStateOf(false) }
+    val profilePhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
         if (uri != null) pendingProfilePhoto = uri
     }
     var tab by remember { mutableIntStateOf(0) }
@@ -222,12 +227,13 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                 bio = signedIn.account.bio.orEmpty(),
                 avatar = signedIn.account.avatarUrl ?: signedIn.account.displayName.take(1).uppercase(),
             ),
+            syncAccount = false,
         )
     }
-    LaunchedEffect(state.localProfile.avatar, authState) {
-        if (authState is AuthState.SignedIn && state.localProfile.avatar.startsWith("data:image/")) {
-            runCatching { auth.updateProfile(state.localProfile.name, state.localProfile.bio, state.localProfile.avatar) }
-                .onFailure { session.showNotice(it.message ?: "Could not sync profile photo") }
+    LaunchedEffect(state.profilePhotoSaving, cropSubmitted) {
+        if (cropSubmitted && !state.profilePhotoSaving) {
+            pendingProfilePhoto = null
+            cropSubmitted = false
         }
     }
     Scaffold(
@@ -300,13 +306,13 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         onDismiss = { showProfile = false },
         onChange = {
             session.saveProfile(it)
-            if (authState is AuthState.SignedIn) appScope.launch {
-                runCatching { auth.updateProfile(it.name, it.bio) }
-                    .onFailure { session.showNotice(it.message ?: "Could not sync profile") }
-            }
-            showProfile = false
         },
-        onChoosePhoto = { profilePhotoPicker.launch(arrayOf("image/*")) },
+        savingPhoto = state.profilePhotoSaving,
+        onChoosePhoto = {
+            profilePhotoPicker.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        },
         onRemovePhoto = session::removeProfilePhoto,
     )
     if (showFriends) FriendsDialog(
@@ -339,6 +345,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         onOutput = session::setOutputLevel,
         onTestSpeaker = session::testSpeaker,
         onSwitchCamera = session::switchCamera,
+        onNoiseCancellation = session::setNoiseCancellation,
         onMessageSounds = session::setMessageSounds,
         onPresenceSounds = session::setPresenceSounds,
         onCameraSounds = session::setCameraSounds,
@@ -378,10 +385,11 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     pendingProfilePhoto?.let { uri ->
         ProfileCropDialog(
             uri = uri,
+            saving = state.profilePhotoSaving,
             onDismiss = { pendingProfilePhoto = null },
             onUse = { zoom, x, y, rotation ->
                 session.chooseProfilePhoto(uri, zoom, x, y, rotation)
-                pendingProfilePhoto = null
+                cropSubmitted = true
             },
         )
     }
@@ -626,13 +634,33 @@ private fun ActiveRoom(
                     onClick = { selectedMember = it },
                 )
                 if (state.cameraEnabled) {
-                    Spacer(Modifier.height(8.dp))
-                    session.videoTrack(null, Track.Source.CAMERA)?.let { VideoTile(it, session, "Your camera") }
+                    TextButton(
+                        onClick = {
+                            expandedMedia = if ("me-camera" in expandedMedia) expandedMedia - "me-camera" else expandedMedia + "me-camera"
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(if ("me-camera" in expandedMedia) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown, null)
+                        Text(if ("me-camera" in expandedMedia) "Hide my camera" else "Show my camera")
+                    }
+                    if ("me-camera" in expandedMedia) {
+                        session.videoTrack(null, Track.Source.CAMERA)?.let { VideoTile(it, session, "Your camera") }
+                    }
                 }
                 if (state.screenShareEnabled) {
-                    Spacer(Modifier.height(8.dp))
-                    session.videoTrack(null, Track.Source.SCREEN_SHARE)?.let {
-                        VideoTile(it, session, "Your screen", isScreenShare = true)
+                    TextButton(
+                        onClick = {
+                            expandedMedia = if ("me-screen" in expandedMedia) expandedMedia - "me-screen" else expandedMedia + "me-screen"
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(if ("me-screen" in expandedMedia) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown, null)
+                        Text(if ("me-screen" in expandedMedia) "Hide my stream" else "Show my stream")
+                    }
+                    if ("me-screen" in expandedMedia) {
+                        session.videoTrack(null, Track.Source.SCREEN_SHARE)?.let {
+                            VideoTile(it, session, "Your screen", isScreenShare = true)
+                        }
                     }
                 }
             }
@@ -730,9 +758,28 @@ private fun ActiveRoom(
         )
     }
     memberAvatarPreview?.let { avatar ->
-        androidx.compose.ui.window.Dialog(onDismissRequest = { memberAvatarPreview = null }) {
-            Box(Modifier.fillMaxWidth().background(Color.Black).padding(14.dp), contentAlignment = Alignment.Center) {
-                AsyncImage(model = avatar, contentDescription = "Profile photo", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxWidth().aspectRatio(1f))
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { memberAvatarPreview = null },
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false,
+            ),
+        ) {
+            Box(
+                Modifier.fillMaxSize().background(Color.Black).clickable { memberAvatarPreview = null },
+                contentAlignment = Alignment.Center,
+            ) {
+                AsyncImage(
+                    model = avatar,
+                    contentDescription = "Profile photo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().padding(18.dp).clickable(enabled = false) {},
+                )
+                IconButton(
+                    onClick = { memberAvatarPreview = null },
+                    modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(18.dp)
+                        .size(48.dp).clip(CircleShape).background(Color(0xB8000000)),
+                ) { Icon(Icons.Rounded.Close, "Close profile photo") }
             }
         }
     }
@@ -904,26 +951,61 @@ private fun VideoTile(
     }
 
     if (fullScreen) {
+        val activity = context as? Activity
+        val configuration = LocalConfiguration.current
+        DisposableEffect(activity) {
+            onDispose {
+                activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+        }
         androidx.compose.ui.window.Dialog(
             onDismissRequest = { fullScreen = false },
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false,
+            ),
         ) {
             var fullControlsVisible by remember { mutableStateOf(true) }
             Box(
                 Modifier.fillMaxSize().background(Color.Black).clickable { fullControlsVisible = !fullControlsVisible },
                 contentAlignment = Alignment.Center,
             ) {
-                AdaptiveVideoRenderer(
-                    track = track,
-                    session = session,
-                    modifier = Modifier.fillMaxSize(),
-                    onAspectRatio = { aspectRatio = it },
-                )
+                BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    val viewportRatio = with(LocalDensity.current) {
+                        maxWidth.toPx() / maxHeight.toPx().coerceAtLeast(1f)
+                    }
+                    val fitModifier = if (aspectRatio >= viewportRatio) {
+                        Modifier.fillMaxWidth().aspectRatio(aspectRatio)
+                    } else {
+                        Modifier.fillMaxHeight().aspectRatio(aspectRatio)
+                    }
+                    AdaptiveVideoRenderer(
+                        track = track,
+                        session = session,
+                        modifier = fitModifier,
+                        onAspectRatio = { aspectRatio = it },
+                    )
+                }
                 if (fullControlsVisible) {
-                    IconButton(
-                        onClick = { fullScreen = false },
-                        modifier = Modifier.align(Alignment.TopEnd).padding(18.dp).size(48.dp).clip(CircleShape).background(Color(0xB8000000)),
-                    ) { Icon(Icons.Rounded.FullscreenExit, "Exit full screen") }
+                    Row(
+                        Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(18.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        IconButton(
+                            onClick = {
+                                activity?.requestedOrientation = if (configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+                                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                                } else {
+                                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                }
+                            },
+                            modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xB8000000)),
+                        ) { Icon(Icons.Rounded.ScreenRotation, "Rotate") }
+                        IconButton(
+                            onClick = { fullScreen = false },
+                            modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xB8000000)),
+                        ) { Icon(Icons.Rounded.FullscreenExit, "Exit full screen") }
+                    }
                 }
             }
         }

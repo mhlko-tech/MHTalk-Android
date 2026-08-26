@@ -21,6 +21,7 @@ import android.util.Base64
 import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mhlko.talk.BuildConfig
@@ -36,7 +37,9 @@ import com.mhlko.talk.data.normalizeRoomAvatar
 import com.mhlko.talk.data.ShareQuality
 import com.mhlko.talk.data.StartupUpdatePhase
 import io.livekit.android.audio.ScreenAudioCapturer
+import io.livekit.android.audio.AudioBufferCallback
 import io.livekit.android.LiveKit
+import io.livekit.android.RoomOptions
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
@@ -46,6 +49,8 @@ import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
 import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.LocalAudioTrack
+import io.livekit.android.room.track.LocalAudioTrackOptions
+import io.livekit.android.room.track.LocalTrackPublication
 import io.livekit.android.room.participant.AudioTrackPublishOptions
 import io.livekit.android.room.track.RemoteAudioTrack
 import io.livekit.android.room.track.RemoteTrackPublication
@@ -68,12 +73,20 @@ import java.util.UUID
 import java.io.File
 import java.io.FileOutputStream
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 
 class SessionViewModel(application: Application) : AndroidViewModel(application) {
     private val auth = AuthRepository.get(application)
     private val api = MHTalkApi(auth::accessToken)
     private val preferences = application.getSharedPreferences("mhtalk", 0)
-    private val room: Room = LiveKit.create(application)
+    private val room: Room = LiveKit.create(
+        application,
+        RoomOptions(
+            audioTrackCaptureDefaults = microphoneCaptureOptions(
+                preferences.getBoolean("audio.noiseCancellation", true),
+            ),
+        ),
+    )
     private val profiles = mutableMapOf<String, UserProfile>()
     private val userVolumes = mutableMapOf<String, Int>()
     private val streamVolumes = mutableMapOf<String, Int>()
@@ -93,6 +106,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     private var microphoneBeforeVoiceNote = true
     private var screenAudioCapturer: ScreenAudioCapturer? = null
     private var screenAudioTrack: LocalAudioTrack? = null
+    private var profileSyncJob: Job? = null
     private val taskRemovedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == CallService.ACTION_TASK_REMOVED) leave()
@@ -104,6 +118,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             termsAccepted = preferences.getBoolean("legal.termsAccepted", false),
             localProfile = profile,
             outputLevel = preferences.getInt("audio.output", 100),
+            noiseCancellationEnabled = preferences.getBoolean("audio.noiseCancellation", true),
             messageSoundsEnabled = preferences.getBoolean("sounds.messages", true),
             presenceSoundsEnabled = preferences.getBoolean("sounds.presence", true),
             cameraSoundsEnabled = preferences.getBoolean("sounds.camera", true),
@@ -220,12 +235,23 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     fun toggleMicrophone() {
         viewModelScope.launch {
             val enabled = !_state.value.microphoneEnabled
-            _state.update { it.copy(microphoneEnabled = enabled) }
             if (_state.value.status == ConnectionStatus.Connected) {
-                runCatching { room.localParticipant.setMicrophoneEnabled(enabled) }
+                runCatching { setMicrophoneState(enabled) }
                     .onFailure(::showFailure)
+            } else {
+                _state.update { it.copy(microphoneEnabled = enabled) }
             }
         }
+    }
+
+    private suspend fun setMicrophoneState(enabled: Boolean) {
+        val publication = room.localParticipant.getTrackPublication(Track.Source.MICROPHONE)
+        if (screenAudioTrack != null && publication is LocalTrackPublication) {
+            publication.muted = !enabled
+        } else {
+            room.localParticipant.setMicrophoneEnabled(enabled)
+        }
+        _state.update { it.copy(microphoneEnabled = enabled) }
     }
 
     fun toggleCamera() {
@@ -246,7 +272,6 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             configureShareQuality(quality)
             startCallService(_state.value.cameraEnabled, screenShare = true)
             runCatching {
-                room.localParticipant.setMicrophoneEnabled(includeMicrophone)
                 room.localParticipant.setScreenShareEnabled(
                     true,
                     ScreenCaptureParams(permissionData) {
@@ -257,7 +282,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 )
             }.onSuccess {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startScreenAudio()
-                _state.update { it.copy(screenShareEnabled = true) }
+                setMicrophoneState(includeMicrophone)
+                _state.update { it.copy(screenShareEnabled = true, microphoneEnabled = includeMicrophone) }
                 syncParticipants()
             }.onFailure {
                 startCallService(_state.value.cameraEnabled, screenShare = false)
@@ -347,10 +373,17 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     fun setParticipantVolume(identity: String, stream: Boolean, volume: Int) {
         val safeVolume = volume.coerceIn(0, 100)
-        val participant = room.remoteParticipants.values.firstOrNull { it.identity?.value == identity } ?: return
-        val source = if (stream) Track.Source.SCREEN_SHARE_AUDIO else Track.Source.MICROPHONE
-        (participant.getTrackPublication(source)?.track as? RemoteAudioTrack)?.setVolume(safeVolume / 100.0)
         if (stream) streamVolumes[identity] = safeVolume else userVolumes[identity] = safeVolume
+        val participant = room.remoteParticipants.values.firstOrNull { it.identity?.value == identity }
+        if (participant == null) {
+            syncParticipants()
+            return
+        }
+        val source = if (stream) Track.Source.SCREEN_SHARE_AUDIO else Track.Source.MICROPHONE
+        participant.trackPublications.values
+            .filter { it.source == source }
+            .mapNotNull { it.track as? RemoteAudioTrack }
+            .forEach { it.setVolume(safeVolume / 100.0) }
         syncParticipants()
     }
 
@@ -670,18 +703,33 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun saveProfile(newProfile: UserProfile) {
+    fun saveProfile(newProfile: UserProfile, syncAccount: Boolean = true) {
+        val normalized = newProfile.copy(
+            name = newProfile.name.trim().ifBlank { "Me" },
+            bio = newProfile.bio.trim(),
+        )
         preferences.edit()
-            .putString("profile.name", newProfile.name.trim().ifBlank { "Me" })
-            .putString("profile.bio", newProfile.bio.trim())
-            .putString("profile.avatar", newProfile.avatar)
+            .putString("profile.name", normalized.name)
+            .putString("profile.bio", normalized.bio)
+            .putString("profile.avatar", normalized.avatar)
             .apply()
-        _state.update { it.copy(localProfile = profile) }
+        _state.update { it.copy(localProfile = normalized) }
         viewModelScope.launch { sendProfile() }
         syncParticipants()
+        if (syncAccount && auth.state.value is com.mhlko.talk.auth.AuthState.SignedIn) {
+            profileSyncJob?.cancel()
+            profileSyncJob = viewModelScope.launch {
+                delay(400)
+                runCatching { auth.updateProfile(normalized.name, normalized.bio) }
+                    .onFailure { error ->
+                        if (error !is CancellationException) showFailure(error)
+                    }
+            }
+        }
     }
 
     fun chooseProfilePhoto(uri: Uri, zoom: Float = 1f, offsetX: Float = 0f, offsetY: Float = 0f, rotation: Int = 0) {
+        _state.update { it.copy(profilePhotoSaving = true) }
         viewModelScope.launch {
             runCatching {
                 val resolver = getApplication<Application>().contentResolver
@@ -701,33 +749,60 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     val options = BitmapFactory.Options().apply { inSampleSize = sample }
                     val source = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
                         ?: error("Could not decode profile image")
-                    val normalizedRotation = ((rotation % 360) + 360) % 360
-                    val oriented = if (normalizedRotation == 0) source else Bitmap.createBitmap(
+                    val exif = runCatching {
+                        resolver.openInputStream(uri)?.use(::ExifInterface)
+                    }.getOrNull()
+                    val normalizedRotation = ((rotation + (exif?.rotationDegrees ?: 0)) % 360 + 360) % 360
+                    val flipped = exif?.isFlipped == true
+                    val oriented = if (normalizedRotation == 0 && !flipped) source else Bitmap.createBitmap(
                         source, 0, 0, source.width, source.height,
-                        Matrix().apply { postRotate(normalizedRotation.toFloat()) }, true,
+                        Matrix().apply {
+                            if (flipped) postScale(-1f, 1f)
+                            postRotate(normalizedRotation.toFloat())
+                        }, true,
                     )
-                    val side = (minOf(oriented.width, oriented.height) / zoom.coerceIn(1f, 3f)).toInt().coerceAtLeast(1)
+                    val side = (minOf(oriented.width, oriented.height) / zoom.coerceIn(1f, 4f)).toInt().coerceAtLeast(1)
                     val centerX = oriented.width / 2f - offsetX.coerceIn(-1f, 1f) * (oriented.width - side) / 2f
                     val centerY = oriented.height / 2f - offsetY.coerceIn(-1f, 1f) * (oriented.height - side) / 2f
                     val left = (centerX - side / 2f).toInt().coerceIn(0, oriented.width - side)
                     val top = (centerY - side / 2f).toInt().coerceIn(0, oriented.height - side)
                     val cropped = Bitmap.createBitmap(oriented, left, top, side, side)
-                    val avatar = Bitmap.createScaledBitmap(cropped, 320, 320, true)
+                    val avatar = Bitmap.createScaledBitmap(cropped, 512, 512, true)
                     val output = ByteArrayOutputStream()
-                    avatar.compress(Bitmap.CompressFormat.JPEG, 86, output)
+                    avatar.compress(Bitmap.CompressFormat.JPEG, 90, output)
                     if (avatar !== cropped) avatar.recycle()
                     if (cropped !== oriented) cropped.recycle()
                     if (oriented !== source) oriented.recycle()
                     source.recycle()
                     "data:image/jpeg;base64,${Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)}"
                 }
-            }.onSuccess { avatar ->
-                saveProfile(profile.copy(avatar = avatar))
-            }.onFailure(::showFailure)
+            }.mapCatching { avatar ->
+                val current = profile
+                val canonicalAvatar = if (auth.state.value is com.mhlko.talk.auth.AuthState.SignedIn) {
+                    auth.updateProfile(current.name, current.bio, avatar) ?: avatar
+                } else avatar
+                saveProfile(current.copy(avatar = canonicalAvatar), syncAccount = false)
+            }.onFailure { error ->
+                if (error !is CancellationException) showFailure(error)
+            }
+            _state.update { it.copy(profilePhotoSaving = false) }
         }
     }
 
-    fun removeProfilePhoto() = saveProfile(profile.copy(avatar = ""))
+    fun removeProfilePhoto() {
+        viewModelScope.launch {
+            _state.update { it.copy(profilePhotoSaving = true) }
+            runCatching {
+                if (auth.state.value is com.mhlko.talk.auth.AuthState.SignedIn) {
+                    auth.updateProfile(profile.name, profile.bio, "")
+                }
+                saveProfile(profile.copy(avatar = ""), syncAccount = false)
+            }.onFailure { error ->
+                if (error !is CancellationException) showFailure(error)
+            }
+            _state.update { it.copy(profilePhotoSaving = false) }
+        }
+    }
 
     fun setOutputLevel(level: Int) {
         val value = level.coerceIn(0, 100)
@@ -755,6 +830,18 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     fun setCameraSounds(enabled: Boolean) = setBooleanPreference("sounds.camera", enabled) { it.copy(cameraSoundsEnabled = enabled) }
     fun setScreenShareSounds(enabled: Boolean) = setBooleanPreference("sounds.screen", enabled) { it.copy(screenShareSoundsEnabled = enabled) }
     fun setScreenSharePrivacy(enabled: Boolean) = setBooleanPreference("privacy.screenShare", enabled) { it.copy(screenSharePrivacyEnabled = enabled) }
+    fun setNoiseCancellation(enabled: Boolean) {
+        preferences.edit().putBoolean("audio.noiseCancellation", enabled).apply()
+        _state.update { it.copy(noiseCancellationEnabled = enabled) }
+        val options = microphoneCaptureOptions(enabled)
+        room.audioTrackCaptureDefaults = options
+        viewModelScope.launch {
+            val track = room.localParticipant.getTrackPublication(Track.Source.MICROPHONE)?.track as? LocalAudioTrack
+                ?: return@launch
+            runCatching { track.applyOptions(options) }
+                .onFailure { error -> if (error !is CancellationException) showFailure(error) }
+        }
+    }
 
     private fun setBooleanPreference(key: String, value: Boolean, update: (SessionUiState) -> SessionUiState) {
         preferences.edit().putBoolean(key, value).apply()
@@ -770,7 +857,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             else -> true
         }
         if (!enabled) return
-        val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 45)
+        val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 72)
         tone.startTone(
             when (kind) {
                 1 -> ToneGenerator.TONE_PROP_BEEP2
@@ -780,9 +867,9 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 5 -> ToneGenerator.TONE_PROP_NACK
                 else -> ToneGenerator.TONE_PROP_BEEP2
             },
-            120,
+            190,
         )
-        viewModelScope.launch { delay(180); tone.release() }
+        viewModelScope.launch { delay(260); tone.release() }
     }
 
     private data class RemoteUpdate(val version: String, val apkUrl: String)
@@ -920,7 +1007,6 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     is RoomEvent.Connected,
                     is RoomEvent.ActiveSpeakersChanged,
                     is RoomEvent.TrackUnpublished,
-                    is RoomEvent.TrackSubscribed,
                     is RoomEvent.TrackUnsubscribed,
                     is RoomEvent.TrackMuted,
                     is RoomEvent.TrackUnmuted,
@@ -929,6 +1015,20 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     is RoomEvent.TrackPublished -> {
                         if (event.participant != room.localParticipant && event.publication.source in setOf(Track.Source.CAMERA, Track.Source.SCREEN_SHARE, Track.Source.SCREEN_SHARE_AUDIO)) {
                             (event.publication as? RemoteTrackPublication)?.setSubscribed(false)
+                        }
+                        syncParticipants()
+                    }
+
+                    is RoomEvent.TrackSubscribed -> {
+                        val identity = event.participant.identity?.value
+                        val audio = event.track as? RemoteAudioTrack
+                        if (identity != null && audio != null) {
+                            val volume = if (event.publication.source == Track.Source.SCREEN_SHARE_AUDIO) {
+                                streamVolumes[identity] ?: 100
+                            } else {
+                                userVolumes[identity] ?: 100
+                            }
+                            audio.setVolume(volume / 100.0)
                         }
                         syncParticipants()
                     }
@@ -1142,8 +1242,17 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         val screenTrack = room.localParticipant.getTrackPublication(Track.Source.SCREEN_SHARE)?.track as? LocalVideoTrack ?: return
         stopScreenAudio()
         ScreenAudioCapturer.createFromScreenShareTrack(screenTrack)?.let { capturer ->
-            val audioTrack = room.localParticipant.createAudioTrack("MHTalk screen audio")
-            audioTrack.setAudioBufferCallback(capturer)
+            val audioTrack = room.localParticipant.createAudioTrack(
+                "MHTalk screen audio",
+                LocalAudioTrackOptions(
+                    noiseSuppression = false,
+                    echoCancellation = false,
+                    autoGainControl = false,
+                    highPassFilter = false,
+                    typingNoiseDetection = false,
+                ),
+            )
+            audioTrack.setAudioBufferCallback(ScreenAudioOnlyBufferCallback(capturer))
             room.localParticipant.publishAudioTrack(
                 audioTrack,
                 AudioTrackPublishOptions(name = "Screen audio", source = Track.Source.SCREEN_SHARE_AUDIO),
@@ -1225,5 +1334,42 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         runCatching { getApplication<Application>().unregisterReceiver(taskRemovedReceiver) }
         room.disconnect()
         super.onCleared()
+    }
+}
+
+private fun microphoneCaptureOptions(noiseCancellation: Boolean) = LocalAudioTrackOptions(
+    noiseSuppression = noiseCancellation,
+    echoCancellation = true,
+    autoGainControl = true,
+    highPassFilter = noiseCancellation,
+    typingNoiseDetection = noiseCancellation,
+)
+
+/** Replaces the dedicated screen-audio track buffer instead of mixing the microphone into it. */
+@androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+private class ScreenAudioOnlyBufferCallback(
+    private val capturer: ScreenAudioCapturer,
+) : AudioBufferCallback {
+    override fun onBuffer(
+        buffer: ByteBuffer,
+        audioFormat: Int,
+        channelCount: Int,
+        sampleRate: Int,
+        bytesRead: Int,
+        captureTimeNs: Long,
+    ): Long {
+        val response = capturer.onBufferRequest(
+            buffer,
+            audioFormat,
+            channelCount,
+            sampleRate,
+            bytesRead,
+            captureTimeNs,
+        )
+        val screen = response?.byteBuffer
+        for (index in 0 until buffer.capacity()) {
+            buffer.put(index, if (screen != null && index < screen.capacity()) screen.get(index) else 0)
+        }
+        return response?.captureTimeNs ?: captureTimeNs
     }
 }

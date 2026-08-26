@@ -19,8 +19,8 @@ android {
         applicationId = "com.mhlko.talk"
         minSdk = 26
         targetSdk = 36
-        versionCode = 13
-        versionName = "1.5.4"
+        versionCode = 14
+        versionName = "1.5.5"
 
         buildConfigField("String", "LIVEKIT_URL", "\"wss://mhtalkremake-utuei6i7.livekit.cloud\"")
         buildConfigField("String", "TOKEN_ENDPOINT", "\"https://mhtalk-token-service.mhlkotalk.workers.dev/livekit/token\"")
@@ -94,6 +94,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.navigation:navigation-compose:2.9.6")
     implementation("androidx.datastore:datastore-preferences:1.2.0")
+    implementation("androidx.exifinterface:exifinterface:1.4.2")
     implementation("io.coil-kt.coil3:coil-compose:3.3.0")
     implementation("io.coil-kt.coil3:coil-gif:3.3.0")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")

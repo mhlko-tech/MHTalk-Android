@@ -19,6 +19,7 @@ internal fun SettingsDialog(
     onOutput: (Int) -> Unit,
     onTestSpeaker: () -> Unit,
     onSwitchCamera: () -> Unit,
+    onNoiseCancellation: (Boolean) -> Unit,
     onMessageSounds: (Boolean) -> Unit,
     onPresenceSounds: (Boolean) -> Unit,
     onCameraSounds: (Boolean) -> Unit,
@@ -40,6 +41,14 @@ internal fun SettingsDialog(
                     valueRange = 0f..100f,
                 )
                 OutlinedButton(onTestSpeaker, Modifier.fillMaxWidth()) { Text("Test speaker") }
+                Spacer(Modifier.height(18.dp))
+                Text("Voice processing", fontWeight = FontWeight.Bold)
+                SettingSwitch(
+                    "Noise cancellation",
+                    "Remove background noise from your microphone only. Screen-share audio stays original.",
+                    state.noiseCancellationEnabled,
+                    onNoiseCancellation,
+                )
                 Spacer(Modifier.height(18.dp))
                 Text("Camera", fontWeight = FontWeight.Bold)
                 Text("Android uses the selected system camera.", color = MHTalkMuted, fontSize = 12.sp)

@@ -21,9 +21,17 @@ class MHTalkMessagingService : FirebaseMessagingService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onRegistered(installationId: String) {
+        registerToken(installationId)
+    }
+
+    override fun onNewToken(token: String) {
+        registerToken(token)
+    }
+
+    private fun registerToken(token: String) {
         scope.launch {
             runCatching {
-                SocialRepository.get(applicationContext).registerDeviceToken(installationId)
+                SocialRepository.get(applicationContext).registerDeviceToken(token)
             }
         }
     }
