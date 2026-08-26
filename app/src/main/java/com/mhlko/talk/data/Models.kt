@@ -10,6 +10,8 @@ enum class ConnectionStatus {
 
 enum class ShareQuality { Low, Medium, High }
 
+enum class StartupUpdatePhase { Checking, Downloading, ReadyToInstall, Error, Complete }
+
 data class UserProfile(
     val name: String = "Me",
     val bio: String = "",
@@ -76,5 +78,9 @@ data class SessionUiState(
     val screenShareSoundsEnabled: Boolean = true,
     val screenSharePrivacyEnabled: Boolean = true,
     val launchReady: Boolean = false,
+    val launchUpdatePhase: StartupUpdatePhase = StartupUpdatePhase.Checking,
+    val launchUpdateProgress: Int? = null,
+    val launchUpdateMessage: String = "Checking for updates",
     val updateVersion: String? = null,
+    val updateApkPath: String? = null,
 )

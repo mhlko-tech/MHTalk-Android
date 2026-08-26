@@ -60,6 +60,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.viewinterop.AndroidView
@@ -72,6 +73,7 @@ import com.mhlko.talk.data.UserProfile
 import com.mhlko.talk.data.isImageAvatar
 import com.mhlko.talk.data.ChatMessageUi
 import com.mhlko.talk.data.ShareQuality
+import com.mhlko.talk.data.StartupUpdatePhase
 import com.mhlko.talk.auth.AuthRepository
 import com.mhlko.talk.auth.AuthState
 import com.mhlko.talk.auth.SocialRepository
@@ -88,6 +90,7 @@ import livekit.org.webrtc.RendererCommon
 import livekit.org.webrtc.VideoFrame
 import livekit.org.webrtc.VideoSink
 import kotlin.math.abs
+import java.io.File
 
 object PipController {
     var inPictureInPicture by mutableStateOf(false)
@@ -108,8 +111,28 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         return
     }
     var pendingShareOptions by remember { mutableStateOf<ShareOptions?>(null) }
+    val updateInstaller = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { /* A successful install replaces this process; cancellation keeps the gate visible. */ }
     if (!state.launchReady) {
-        LaunchScreen()
+        LaunchScreen(
+            state = state,
+            onRetry = session::retryUpdateCheck,
+            onInstall = {
+                val path = state.updateApkPath ?: return@LaunchScreen
+                val apk = File(path)
+                if (!apk.isFile) {
+                    session.retryUpdateCheck()
+                    return@LaunchScreen
+                }
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", apk)
+                updateInstaller.launch(
+                    Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(uri, "application/vnd.android.package-archive")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                )
+            },
+        )
         return
     }
     LaunchedEffect(authState) {
@@ -394,31 +417,54 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
             confirmButton = { TextButton(session::dismissNotice) { Text("OK") } },
         )
     }
-    state.updateVersion?.let { version ->
-        AlertDialog(
-            onDismissRequest = {},
-            title = { Text("Update available") },
-            text = { Text("MHTalk $version is required to continue. Update now to use rooms and calls.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/mhlko-tech/MHTalk-Android/releases/latest")))
-                }) { Text("Update") }
-            },
-        )
-    }
 }
 
 @Composable
-private fun LaunchScreen() {
+private fun LaunchScreen(
+    state: SessionUiState,
+    onRetry: () -> Unit,
+    onInstall: () -> Unit,
+) {
     Box(Modifier.fillMaxSize().background(MHTalkBackground), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 38.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
             Box(Modifier.size(108.dp).clip(RoundedCornerShape(30.dp)).background(Brush.linearGradient(listOf(MHTalkPurple, Color(0xFF40359D)))), contentAlignment = Alignment.Center) {
                 Text("M", color = Color.White, fontSize = 60.sp, fontWeight = FontWeight.Black)
             }
             Spacer(Modifier.height(18.dp))
             Text("MHTalk ${BuildConfig.VERSION_NAME}", color = MHTalkText, fontWeight = FontWeight.ExtraBold, fontSize = 26.sp)
-            Spacer(Modifier.height(8.dp))
-            CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = MHTalkGreen)
+            Spacer(Modifier.height(13.dp))
+            Text(state.launchUpdateMessage, color = MHTalkMuted, fontSize = 13.sp)
+            Spacer(Modifier.height(15.dp))
+            if (state.launchUpdateProgress == null) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
+                    color = MHTalkPurple,
+                    trackColor = Color(0xFF30364F),
+                )
+            } else {
+                LinearProgressIndicator(
+                    progress = { state.launchUpdateProgress / 100f },
+                    modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
+                    color = MHTalkPurple,
+                    trackColor = Color(0xFF30364F),
+                )
+                Spacer(Modifier.height(7.dp))
+                Text("${state.launchUpdateProgress}%", color = MHTalkMuted, fontSize = 11.sp)
+            }
+            when (state.launchUpdatePhase) {
+                StartupUpdatePhase.ReadyToInstall -> {
+                    Spacer(Modifier.height(17.dp))
+                    Button(onInstall, Modifier.fillMaxWidth()) { Text("Install update") }
+                }
+                StartupUpdatePhase.Error -> {
+                    Spacer(Modifier.height(17.dp))
+                    Button(onRetry, Modifier.fillMaxWidth()) { Text("Retry") }
+                }
+                else -> Unit
+            }
         }
     }
 }

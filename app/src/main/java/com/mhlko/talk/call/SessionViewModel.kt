@@ -34,6 +34,7 @@ import com.mhlko.talk.data.SessionUiState
 import com.mhlko.talk.data.UserProfile
 import com.mhlko.talk.data.normalizeRoomAvatar
 import com.mhlko.talk.data.ShareQuality
+import com.mhlko.talk.data.StartupUpdatePhase
 import io.livekit.android.audio.ScreenAudioCapturer
 import io.livekit.android.LiveKit
 import io.livekit.android.events.RoomEvent
@@ -82,6 +83,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     private var localTypingJob: Job? = null
     private var roomEventsJob: Job? = null
     private var countJob: Job? = null
+    private var updateJob: Job? = null
     private var wantedRoom: String? = null
     private var wantedInviteCode: String? = null
     private var userLeft = false
@@ -783,20 +785,117 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch { delay(180); tone.release() }
     }
 
+    private data class RemoteUpdate(val version: String, val apkUrl: String)
+
+    fun retryUpdateCheck() = checkForUpdate()
+
     private fun checkForUpdate() {
-        viewModelScope.launch {
-            val remote = runCatching {
-                withContext(Dispatchers.IO) {
-                    val connection = java.net.URL("https://api.github.com/repos/mhlko-tech/MHTalk-Android/releases/latest").openConnection()
-                    connection.connectTimeout = 2_500
-                    connection.readTimeout = 2_500
-                    connection.getInputStream().bufferedReader().use { JSONObject(it.readText()).optString("tag_name") }
+        if (updateJob?.isActive == true) return
+        updateJob = viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    launchReady = false,
+                    launchUpdatePhase = StartupUpdatePhase.Checking,
+                    launchUpdateProgress = null,
+                    launchUpdateMessage = "Checking for updates",
+                    updateApkPath = null,
+                )
+            }
+            runCatching {
+                val remote = withContext(Dispatchers.IO) { fetchLatestUpdate() }
+                if (remote == null || !isNewerVersion(remote.version, BuildConfig.VERSION_NAME)) {
+                    _state.update {
+                        it.copy(
+                            launchReady = true,
+                            launchUpdatePhase = StartupUpdatePhase.Complete,
+                            launchUpdateProgress = 100,
+                            launchUpdateMessage = "MHTalk is up to date",
+                            updateVersion = null,
+                        )
+                    }
+                    return@runCatching
                 }
-            }.getOrNull()
-            val available = remote?.trim()?.removePrefix("v")?.takeIf { it.isNotBlank() && isNewerVersion(it, BuildConfig.VERSION_NAME) }
-            _state.update { it.copy(launchReady = true, updateVersion = available) }
+                _state.update {
+                    it.copy(
+                        launchUpdatePhase = StartupUpdatePhase.Downloading,
+                        launchUpdateProgress = 0,
+                        launchUpdateMessage = "Downloading MHTalk ${remote.version}",
+                        updateVersion = remote.version,
+                    )
+                }
+                val apk = withContext(Dispatchers.IO) { downloadUpdate(remote) }
+                _state.update {
+                    it.copy(
+                        launchUpdatePhase = StartupUpdatePhase.ReadyToInstall,
+                        launchUpdateProgress = 100,
+                        launchUpdateMessage = "Update downloaded. Install to continue.",
+                        updateApkPath = apk.absolutePath,
+                    )
+                }
+            }.onFailure {
+                _state.update { current ->
+                    current.copy(
+                        launchReady = false,
+                        launchUpdatePhase = StartupUpdatePhase.Error,
+                        launchUpdateProgress = null,
+                        launchUpdateMessage = "Could not check for updates. Check your internet connection and retry.",
+                    )
+                }
+            }
         }
-        viewModelScope.launch { delay(2_800); _state.update { it.copy(launchReady = true) } }
+    }
+
+    private fun fetchLatestUpdate(): RemoteUpdate? {
+        val connection = java.net.URL("https://api.github.com/repos/mhlko-tech/MHTalk-Android/releases/latest").openConnection()
+        connection.connectTimeout = 15_000
+        connection.readTimeout = 15_000
+        connection.setRequestProperty("Accept", "application/vnd.github+json")
+        connection.setRequestProperty("User-Agent", "MHTalk-Android/${BuildConfig.VERSION_NAME}")
+        val release = connection.getInputStream().bufferedReader().use { JSONObject(it.readText()) }
+        val version = release.optString("tag_name").trim().removePrefix("v")
+        if (version.isBlank()) return null
+        val assets = release.optJSONArray("assets") ?: return null
+        val apkUrl = (0 until assets.length())
+            .asSequence()
+            .map(assets::getJSONObject)
+            .firstOrNull { it.optString("name").endsWith(".apk", ignoreCase = true) }
+            ?.optString("browser_download_url")
+            .orEmpty()
+        if (apkUrl.isBlank()) throw IllegalStateException("The Android update package is missing")
+        return RemoteUpdate(version, apkUrl)
+    }
+
+    private fun downloadUpdate(remote: RemoteUpdate): File {
+        val updateDirectory = File(getApplication<Application>().cacheDir, "updates").apply { mkdirs() }
+        val partial = File(updateDirectory, "MHTalk-${remote.version}.apk.part")
+        val destination = File(updateDirectory, "MHTalk-${remote.version}.apk")
+        val connection = java.net.URL(remote.apkUrl).openConnection().apply {
+            connectTimeout = 20_000
+            readTimeout = 30_000
+            setRequestProperty("User-Agent", "MHTalk-Android/${BuildConfig.VERSION_NAME}")
+        }
+        val total = connection.contentLengthLong.takeIf { it > 0 }
+        connection.getInputStream().use { input ->
+            FileOutputStream(partial, false).use { output ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var downloaded = 0L
+                var lastProgress = -1
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    output.write(buffer, 0, count)
+                    downloaded += count
+                    val progress = total?.let { ((downloaded * 100) / it).toInt().coerceIn(0, 99) }
+                    if (progress != null && progress != lastProgress) {
+                        lastProgress = progress
+                        _state.update { it.copy(launchUpdateProgress = progress) }
+                    }
+                }
+            }
+        }
+        if (destination.exists() && !destination.delete()) throw IllegalStateException("Could not replace the old update")
+        if (!partial.renameTo(destination)) throw IllegalStateException("Could not prepare the update")
+        return destination
     }
 
     private fun isNewerVersion(remote: String, current: String): Boolean {
@@ -812,7 +911,6 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun dismissError() = _state.update { it.copy(error = null) }
-    fun dismissUpdate() = _state.update { it.copy(updateVersion = null) }
 
     private fun collectRoomEvents() {
         roomEventsJob?.cancel()
