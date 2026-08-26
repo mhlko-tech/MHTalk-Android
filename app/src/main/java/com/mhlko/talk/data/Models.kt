@@ -71,6 +71,7 @@ data class SessionUiState(
     val outputLevel: Int = 100,
     val isRecordingVoice: Boolean = false,
     val messageSoundsEnabled: Boolean = true,
+    val presenceSoundsEnabled: Boolean = true,
     val cameraSoundsEnabled: Boolean = true,
     val screenShareSoundsEnabled: Boolean = true,
     val screenSharePrivacyEnabled: Boolean = true,

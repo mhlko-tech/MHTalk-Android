@@ -103,6 +103,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             localProfile = profile,
             outputLevel = preferences.getInt("audio.output", 100),
             messageSoundsEnabled = preferences.getBoolean("sounds.messages", true),
+            presenceSoundsEnabled = preferences.getBoolean("sounds.presence", true),
             cameraSoundsEnabled = preferences.getBoolean("sounds.camera", true),
             screenShareSoundsEnabled = preferences.getBoolean("sounds.screen", true),
             screenSharePrivacyEnabled = preferences.getBoolean("privacy.screenShare", true),
@@ -199,6 +200,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             localProfile = profile,
             outputLevel = preferences.getInt("audio.output", 100),
             messageSoundsEnabled = preferences.getBoolean("sounds.messages", true),
+            presenceSoundsEnabled = preferences.getBoolean("sounds.presence", true),
             cameraSoundsEnabled = preferences.getBoolean("sounds.camera", true),
             screenShareSoundsEnabled = preferences.getBoolean("sounds.screen", true),
             screenSharePrivacyEnabled = preferences.getBoolean("privacy.screenShare", true),
@@ -745,6 +747,9 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setMessageSounds(enabled: Boolean) = setBooleanPreference("sounds.messages", enabled) { it.copy(messageSoundsEnabled = enabled) }
+    fun setPresenceSounds(enabled: Boolean) = setBooleanPreference("sounds.presence", enabled) {
+        it.copy(presenceSoundsEnabled = enabled)
+    }.also { if (enabled) playEventTone(4) }
     fun setCameraSounds(enabled: Boolean) = setBooleanPreference("sounds.camera", enabled) { it.copy(cameraSoundsEnabled = enabled) }
     fun setScreenShareSounds(enabled: Boolean) = setBooleanPreference("sounds.screen", enabled) { it.copy(screenShareSoundsEnabled = enabled) }
     fun setScreenSharePrivacy(enabled: Boolean) = setBooleanPreference("privacy.screenShare", enabled) { it.copy(screenSharePrivacyEnabled = enabled) }
@@ -759,7 +764,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             1 -> _state.value.messageSoundsEnabled
             2 -> _state.value.cameraSoundsEnabled
             3, 6 -> _state.value.screenShareSoundsEnabled
-            else -> _state.value.messageSoundsEnabled
+            4, 5 -> _state.value.presenceSoundsEnabled
+            else -> true
         }
         if (!enabled) return
         val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 45)
@@ -819,7 +825,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     is RoomEvent.TrackSubscribed,
                     is RoomEvent.TrackUnsubscribed,
                     is RoomEvent.TrackMuted,
-                    is RoomEvent.TrackUnmuted -> syncParticipants()
+                    is RoomEvent.TrackUnmuted,
+                    is RoomEvent.ParticipantMetadataChanged -> syncParticipants()
 
                     is RoomEvent.TrackPublished -> {
                         if (event.participant != room.localParticipant && event.publication.source in setOf(Track.Source.CAMERA, Track.Source.SCREEN_SHARE, Track.Source.SCREEN_SHARE_AUDIO)) {
@@ -963,9 +970,17 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     private fun Participant.toUi(): MemberUi {
         val id = identity?.value?.takeIf { it.isNotBlank() } ?: sid.value
-        val displayName = profiles[id]?.name?.takeIf { it.isNotBlank() }
+        val dataProfile = profiles[id]
+        val metadataProfile = participantMetadataProfile(id)
+        val displayName = dataProfile?.name?.takeIf { it.isNotBlank() }
+            ?: metadataProfile?.name?.takeIf { it.isNotBlank() }
             ?: name?.takeIf { it.isNotBlank() }
             ?: id.take(16).ifBlank { "Member" }
+        val dataAvatar = normalizeRoomAvatar(dataProfile?.avatar.orEmpty())
+        val metadataAvatar = normalizeRoomAvatar(metadataProfile?.avatar.orEmpty())
+        val avatar = dataAvatar.takeIf(::isImageAvatar)
+            ?: metadataAvatar.takeIf(::isImageAvatar)
+            ?: dataAvatar.ifBlank { metadataAvatar }
         val microphone = getTrackPublication(Track.Source.MICROPHONE)
         val camera = getTrackPublication(Track.Source.CAMERA)
         val screen = getTrackPublication(Track.Source.SCREEN_SHARE)
@@ -976,8 +991,9 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             microphoneEnabled = microphone != null && !microphone.muted,
             cameraEnabled = camera != null && !camera.muted,
             screenShareEnabled = screen != null && !screen.muted,
-            bio = profiles[id]?.bio.orEmpty(),
-            avatar = profiles[id]?.avatar.orEmpty(),
+            bio = dataProfile?.bio?.ifBlank { metadataProfile?.bio.orEmpty() }
+                ?: metadataProfile?.bio.orEmpty(),
+            avatar = avatar,
             userVolume = userVolumes[id] ?: 100,
             streamVolume = streamVolumes[id] ?: 100,
         )
@@ -993,8 +1009,27 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 "profile",
                 JSONObject().put("name", value.name).put("bio", value.bio).put("avatar", safeAvatar),
             )
+        runCatching {
+            room.localParticipant.updateMetadata(
+                JSONObject().put("name", value.name).put("bio", value.bio).put("avatar", safeAvatar).toString(),
+            )
+        }
         room.localParticipant.publishData(payload.toString().toByteArray(), topic = "mhtalk.chat").getOrThrow()
     }
+
+    private fun Participant.participantMetadataProfile(identity: String): UserProfile? = runCatching {
+        val source = JSONObject(metadata.orEmpty())
+        val rawName = source.optString("name").ifBlank { source.optString("username") }
+        val rawAvatar = source.optString("avatar").ifBlank { source.optString("avatar_url") }
+        UserProfile(
+            name = rawName.trim().take(60).ifBlank { identity.take(16) },
+            bio = source.optString("bio").trim().take(240),
+            avatar = normalizeRoomAvatar(rawAvatar),
+        )
+    }.getOrNull()
+
+    private fun isImageAvatar(value: String): Boolean =
+        value.startsWith("https://", ignoreCase = true) || value.startsWith("data:image/", ignoreCase = true)
 
     private suspend fun requestProfiles() {
         room.localParticipant.publishData(

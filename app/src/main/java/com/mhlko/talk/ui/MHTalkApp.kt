@@ -297,6 +297,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         onTestSpeaker = session::testSpeaker,
         onSwitchCamera = session::switchCamera,
         onMessageSounds = session::setMessageSounds,
+        onPresenceSounds = session::setPresenceSounds,
         onCameraSounds = session::setCameraSounds,
         onScreenSounds = session::setScreenShareSounds,
         onScreenPrivacy = session::setScreenSharePrivacy,

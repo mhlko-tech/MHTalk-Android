@@ -20,6 +20,7 @@ internal fun SettingsDialog(
     onTestSpeaker: () -> Unit,
     onSwitchCamera: () -> Unit,
     onMessageSounds: (Boolean) -> Unit,
+    onPresenceSounds: (Boolean) -> Unit,
     onCameraSounds: (Boolean) -> Unit,
     onScreenSounds: (Boolean) -> Unit,
     onScreenPrivacy: (Boolean) -> Unit,
@@ -50,6 +51,7 @@ internal fun SettingsDialog(
                 Spacer(Modifier.height(18.dp))
                 Text("Event sounds", fontWeight = FontWeight.Bold)
                 SettingSwitch("New messages", "A soft sound when someone sends a message.", state.messageSoundsEnabled, onMessageSounds)
+                SettingSwitch("Join and leave", "A sound when a member enters or leaves the room.", state.presenceSoundsEnabled, onPresenceSounds)
                 SettingSwitch("Camera activity", "A sound when a member starts their camera.", state.cameraSoundsEnabled, onCameraSounds)
                 SettingSwitch("Screen-share activity", "A sound when a member starts sharing their screen.", state.screenShareSoundsEnabled, onScreenSounds)
                 Spacer(Modifier.height(18.dp))
@@ -72,4 +74,3 @@ private fun SettingSwitch(title: String, detail: String, checked: Boolean, onChe
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
-
