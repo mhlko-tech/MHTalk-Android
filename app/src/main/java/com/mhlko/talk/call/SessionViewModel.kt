@@ -28,6 +28,8 @@ import com.mhlko.talk.BuildConfig
 import com.mhlko.talk.auth.AuthRepository
 import com.mhlko.talk.data.ChatMessageUi
 import com.mhlko.talk.data.AttachmentUi
+import com.mhlko.talk.data.AvatarCropSelection
+import com.mhlko.talk.data.calculateAvatarCrop
 import com.mhlko.talk.data.ConnectionStatus
 import com.mhlko.talk.data.MHTalkApi
 import com.mhlko.talk.data.MemberUi
@@ -728,7 +730,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun chooseProfilePhoto(uri: Uri, zoom: Float = 1f, offsetX: Float = 0f, offsetY: Float = 0f, rotation: Int = 0) {
+    fun chooseProfilePhoto(uri: Uri, selection: AvatarCropSelection) {
         _state.update { it.copy(profilePhotoSaving = true) }
         viewModelScope.launch {
             runCatching {
@@ -752,7 +754,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     val exif = runCatching {
                         resolver.openInputStream(uri)?.use(::ExifInterface)
                     }.getOrNull()
-                    val normalizedRotation = ((rotation + (exif?.rotationDegrees ?: 0)) % 360 + 360) % 360
+                    val normalizedRotation = ((selection.rotation + (exif?.rotationDegrees ?: 0)) % 360 + 360) % 360
                     val flipped = exif?.isFlipped == true
                     val oriented = if (normalizedRotation == 0 && !flipped) source else Bitmap.createBitmap(
                         source, 0, 0, source.width, source.height,
@@ -761,12 +763,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                             postRotate(normalizedRotation.toFloat())
                         }, true,
                     )
-                    val side = (minOf(oriented.width, oriented.height) / zoom.coerceIn(1f, 4f)).toInt().coerceAtLeast(1)
-                    val centerX = oriented.width / 2f - offsetX.coerceIn(-1f, 1f) * (oriented.width - side) / 2f
-                    val centerY = oriented.height / 2f - offsetY.coerceIn(-1f, 1f) * (oriented.height - side) / 2f
-                    val left = (centerX - side / 2f).toInt().coerceIn(0, oriented.width - side)
-                    val top = (centerY - side / 2f).toInt().coerceIn(0, oriented.height - side)
-                    val cropped = Bitmap.createBitmap(oriented, left, top, side, side)
+                    val crop = calculateAvatarCrop(oriented.width, oriented.height, selection)
+                    val cropped = Bitmap.createBitmap(oriented, crop.left, crop.top, crop.side, crop.side)
                     val avatar = Bitmap.createScaledBitmap(cropped, 512, 512, true)
                     val output = ByteArrayOutputStream()
                     avatar.compress(Bitmap.CompressFormat.JPEG, 90, output)
@@ -782,6 +780,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     auth.updateProfile(current.name, current.bio, avatar) ?: avatar
                 } else avatar
                 saveProfile(current.copy(avatar = canonicalAvatar), syncAccount = false)
+                _state.update { it.copy(profilePhotoRevision = it.profilePhotoRevision + 1) }
             }.onFailure { error ->
                 if (error !is CancellationException) showFailure(error)
             }

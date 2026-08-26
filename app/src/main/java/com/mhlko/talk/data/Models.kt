@@ -73,6 +73,7 @@ data class SessionUiState(
     val outputLevel: Int = 100,
     val noiseCancellationEnabled: Boolean = true,
     val profilePhotoSaving: Boolean = false,
+    val profilePhotoRevision: Long = 0,
     val isRecordingVoice: Boolean = false,
     val messageSoundsEnabled: Boolean = true,
     val presenceSoundsEnabled: Boolean = true,

@@ -83,6 +83,7 @@ import com.mhlko.talk.auth.AuthRepository
 import com.mhlko.talk.auth.AuthState
 import com.mhlko.talk.auth.SocialRepository
 import com.mhlko.talk.ui.auth.RequiredSignInScreen
+import com.mhlko.talk.ui.components.ProfileAvatar
 import com.mhlko.talk.ui.theme.*
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
@@ -215,8 +216,14 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     var shareOptionsOpen by remember { mutableStateOf(false) }
     var pendingProfilePhoto by remember { mutableStateOf<Uri?>(null) }
     var cropSubmitted by remember { mutableStateOf(false) }
+    var cropStartRevision by remember { mutableLongStateOf(0L) }
     val profilePhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
-        if (uri != null) pendingProfilePhoto = uri
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            pendingProfilePhoto = uri
+        }
     }
     var tab by remember { mutableIntStateOf(0) }
     LaunchedEffect(authState) {
@@ -230,8 +237,8 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
             syncAccount = false,
         )
     }
-    LaunchedEffect(state.profilePhotoSaving, cropSubmitted) {
-        if (cropSubmitted && !state.profilePhotoSaving) {
+    LaunchedEffect(state.profilePhotoRevision, cropSubmitted) {
+        if (cropSubmitted && state.profilePhotoRevision > cropStartRevision) {
             pendingProfilePhoto = null
             cropSubmitted = false
         }
@@ -387,8 +394,9 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
             uri = uri,
             saving = state.profilePhotoSaving,
             onDismiss = { pendingProfilePhoto = null },
-            onUse = { zoom, x, y, rotation ->
-                session.chooseProfilePhoto(uri, zoom, x, y, rotation)
+            onUse = { selection ->
+                cropStartRevision = state.profilePhotoRevision
+                session.chooseProfilePhoto(uri, selection)
                 cropSubmitted = true
             },
         )
@@ -511,18 +519,13 @@ private fun Header(
         Modifier.fillMaxWidth().background(MHTalkSurface).padding(horizontal = 18.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (!isImageAvatar(state.localProfile.avatar)) {
-            Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(MHTalkPurple), contentAlignment = Alignment.Center) {
-                Text(state.localProfile.avatar.take(2).ifBlank { "MH" }.uppercase(), color = Color.White, fontWeight = FontWeight.Black, fontSize = 13.sp)
-            }
-        } else {
-            AsyncImage(
-                model = state.localProfile.avatar,
-                contentDescription = "Profile photo",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)),
-            )
-        }
+        ProfileAvatar(
+            avatar = state.localProfile.avatar,
+            name = state.localProfile.name,
+            modifier = Modifier.size(42.dp),
+            shape = RoundedCornerShape(14.dp),
+            fontSize = 13.sp,
+        )
         Column(Modifier.padding(start = 12.dp).weight(1f)) {
             Text(if (state.roomName == null) "MHTalk ${BuildConfig.VERSION_NAME}" else if (state.roomName == "Main") "Main channel" else "Private channel", fontWeight = FontWeight.ExtraBold, fontSize = 21.sp)
             Text(statusText(state.status), color = statusColor(state.status), fontSize = 12.sp)
@@ -704,18 +707,15 @@ private fun ActiveRoom(
             title = { Text(member.name) },
             text = {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    if (!isImageAvatar(member.avatar)) {
-                        Box(Modifier.size(110.dp).clip(CircleShape).background(MHTalkPurple), contentAlignment = Alignment.Center) {
-                            Text(member.avatar.take(1).ifBlank { member.name.take(1) }.uppercase(), fontSize = 38.sp, fontWeight = FontWeight.Black)
-                        }
-                    } else {
-                        AsyncImage(
-                            model = member.avatar,
-                            contentDescription = member.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.size(110.dp).clip(CircleShape).clickable { memberAvatarPreview = member.avatar },
-                        )
-                    }
+                    ProfileAvatar(
+                        avatar = member.avatar,
+                        name = member.name,
+                        modifier = Modifier.size(110.dp).clickable(enabled = isImageAvatar(member.avatar)) {
+                            memberAvatarPreview = member.avatar
+                        },
+                        shape = CircleShape,
+                        fontSize = 38.sp,
+                    )
                     Spacer(Modifier.height(14.dp))
                     Text(member.bio.ifBlank { "No bio yet." }, color = MHTalkMuted)
                     if (member.identity != "me") {
@@ -1106,13 +1106,13 @@ private fun MemberRow(member: MemberUi, mine: Boolean, onClick: (MemberUi) -> Un
         border = if (member.speaking) androidx.compose.foundation.BorderStroke(1.5.dp, MHTalkGreen) else null,
     ) {
         Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (!isImageAvatar(member.avatar)) {
-                Box(Modifier.size(43.dp).clip(CircleShape).background(if (mine) MHTalkPurple else Color(0xFF343A59)), contentAlignment = Alignment.Center) {
-                    Text(member.avatar.take(1).ifBlank { member.name.take(1) }.uppercase(), fontWeight = FontWeight.Black)
-                }
-            } else {
-                AsyncImage(model = member.avatar, contentDescription = member.name, contentScale = ContentScale.Crop, modifier = Modifier.size(43.dp).clip(CircleShape))
-            }
+            ProfileAvatar(
+                avatar = member.avatar,
+                name = member.name,
+                modifier = Modifier.size(43.dp),
+                shape = CircleShape,
+                background = if (mine) MHTalkPurple else Color(0xFF343A59),
+            )
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
                 Text(member.name, fontWeight = FontWeight.Bold)
                 Text(if (member.microphoneEnabled) "Mic on" else "Listening", color = MHTalkMuted, fontSize = 12.sp)

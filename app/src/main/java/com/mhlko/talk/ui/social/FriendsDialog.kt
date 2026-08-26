@@ -15,17 +15,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil3.compose.AsyncImage
 import com.mhlko.talk.auth.AuthState
 import com.mhlko.talk.auth.FriendProfile
 import com.mhlko.talk.auth.IncomingFriendRequest
+import com.mhlko.talk.ui.components.ProfileAvatar
 import com.mhlko.talk.ui.theme.MHTalkGreen
 import com.mhlko.talk.ui.theme.MHTalkMuted
-import com.mhlko.talk.ui.theme.MHTalkPurple
 import kotlinx.coroutines.launch
 
 @Composable
@@ -165,9 +163,10 @@ private fun SocialPerson(profile: FriendProfile, showPresence: Boolean = false, 
 
 @Composable
 private fun SocialAvatar(url: String?, name: String) {
-    if (!url.isNullOrBlank()) AsyncImage(url, name, contentScale = ContentScale.Crop, modifier = Modifier.size(42.dp).clip(CircleShape))
-    else Box(Modifier.size(42.dp).clip(CircleShape).background(MHTalkPurple), contentAlignment = Alignment.Center) {
-        Text(name.take(1).uppercase(), fontWeight = FontWeight.Black)
-    }
+    ProfileAvatar(
+        avatar = url,
+        name = name,
+        modifier = Modifier.size(42.dp),
+        shape = CircleShape,
+    )
 }
-
