@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.mhlko.talk.data.UserProfile
+import com.mhlko.talk.data.isImageAvatar
 import com.mhlko.talk.ui.theme.MHTalkMuted
 import com.mhlko.talk.ui.theme.MHTalkPurple
 
@@ -51,10 +52,11 @@ internal fun ProfileDialog(
                 }
                 OutlinedTextField(
                     value = name,
-                    onValueChange = { name = it.take(32) },
+                    onValueChange = { name = it.take(60) },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Name") },
                     singleLine = true,
+                    supportingText = { Text("يدعم الأسماء العربية والإنجليزية", color = MHTalkMuted) },
                 )
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
@@ -138,4 +140,3 @@ internal fun ProfileCropDialog(
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
     )
 }
-

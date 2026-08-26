@@ -69,6 +69,7 @@ import com.mhlko.talk.data.ConnectionStatus
 import com.mhlko.talk.data.MemberUi
 import com.mhlko.talk.data.SessionUiState
 import com.mhlko.talk.data.UserProfile
+import com.mhlko.talk.data.isImageAvatar
 import com.mhlko.talk.data.ChatMessageUi
 import com.mhlko.talk.data.ShareQuality
 import com.mhlko.talk.auth.AuthRepository

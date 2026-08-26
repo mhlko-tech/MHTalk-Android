@@ -31,6 +31,7 @@ import com.mhlko.talk.data.MHTalkApi
 import com.mhlko.talk.data.MemberUi
 import com.mhlko.talk.data.SessionUiState
 import com.mhlko.talk.data.UserProfile
+import com.mhlko.talk.data.normalizeRoomAvatar
 import com.mhlko.talk.data.ShareQuality
 import io.livekit.android.audio.ScreenAudioCapturer
 import io.livekit.android.LiveKit
@@ -859,9 +860,9 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 "profile" -> {
                     val source = payload.optJSONObject("profile") ?: return
                     profiles[identity] = UserProfile(
-                        name = source.optString("name", identity.take(16)),
-                        bio = source.optString("bio"),
-                        avatar = source.optString("avatar"),
+                        name = source.optString("name", identity.take(16)).trim().take(60).ifBlank { identity.take(16) },
+                        bio = source.optString("bio").trim().take(240),
+                        avatar = normalizeRoomAvatar(source.optString("avatar")),
                     )
                     if (remoteTyping.containsKey(identity)) {
                         remoteTyping[identity] = profiles[identity]?.name ?: identity.take(16)
@@ -978,7 +979,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     private suspend fun sendProfile() {
         if (_state.value.status == ConnectionStatus.Idle) return
         val value = profile
-        val safeAvatar = value.avatar.takeIf { it.toByteArray().size <= 11_000 }.orEmpty()
+        val safeAvatar = normalizeRoomAvatar(value.avatar)
         val payload = JSONObject()
             .put("type", "profile")
             .put(
