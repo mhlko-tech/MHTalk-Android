@@ -38,6 +38,13 @@ sealed interface AuthState {
     data object SignedOut : AuthState
     data object Authenticating : AuthState
     data class AwaitingVerification(val email: String) : AuthState
+    data class AccountExists(
+        val email: String, val googleLinked: Boolean, val passwordEnabled: Boolean, val message: String,
+    ) : AuthState
+    data class Onboarding(
+        val email: String, val username: String, val displayName: String,
+        val avatarUrl: String?, val creationVerified: Boolean,
+    ) : AuthState
     data object PasswordRecovery : AuthState
     data class SignedIn(val account: MHTalkAccount) : AuthState
     data class Failed(val message: String) : AuthState
@@ -110,11 +117,18 @@ class AuthRepository private constructor(context: Context) {
     suspend fun register(username: String, displayName: String, email: String, password: String) = withContext(Dispatchers.IO) {
         _state.value = AuthState.Authenticating
         runCatching {
-            gatewayPost(
-                "/auth/register",
-                JSONObject().put("username", username.trim()).put("displayName", displayName.trim())
+            val (status, value) = gatewayResponse(
+                "/auth/register", JSONObject().put("username", username.trim()).put("displayName", displayName.trim())
                     .put("email", email.trim()).put("password", password),
             )
+            if (status !in 200..299 && value.optString("code") == "ACCOUNT_EXISTS") {
+                _state.value = AuthState.AccountExists(
+                    value.optString("email", email.trim()), value.optBoolean("googleLinked"), value.optBoolean("passwordEnabled"),
+                    value.optString("error", "This email is already used by an MHTalk account."),
+                )
+                return@runCatching
+            }
+            if (status !in 200..299) throw IllegalStateException(value.optString("error", "Could not create account"))
             _state.value = AuthState.AwaitingVerification(email.trim())
         }.onFailure { _state.value = AuthState.Failed(it.message ?: "Could not create account") }
     }
@@ -134,6 +148,45 @@ class AuthRepository private constructor(context: Context) {
         }
     }
 
+    suspend fun verifyEmailCode(email: String, code: String, displayName: String, avatar: String?) = withContext(Dispatchers.IO) {
+        verifyOtp(email, code, "signup")
+        refreshProfile()
+        if (avatar?.startsWith("data:image/") == true && _state.value is AuthState.SignedIn)
+            updateProfile(displayName, "", avatar)
+    }
+
+    suspend fun verifyPasswordRecoveryCode(email: String, code: String) = withContext(Dispatchers.IO) {
+        verifyOtp(email, code, "recovery")
+        _state.value = AuthState.PasswordRecovery
+    }
+
+    fun clearAuthError() {
+        if (_state.value is AuthState.Failed) _state.value = if (configured) AuthState.SignedOut else AuthState.Unavailable
+    }
+
+    fun dismissAccountNotice() {
+        if (_state.value is AuthState.AccountExists) _state.value = if (configured) AuthState.SignedOut else AuthState.Unavailable
+    }
+
+    suspend fun startGoogleOnboarding() = withContext(Dispatchers.IO) {
+        authenticatedGatewayPost("/auth/onboarding/start", JSONObject())
+    }
+
+    suspend fun completeGoogleOnboarding(
+        username: String, displayName: String, avatar: String?, code: String,
+    ) = withContext(Dispatchers.IO) {
+        val onboarding = _state.value as? AuthState.Onboarding ?: throw IllegalStateException("Google onboarding is unavailable")
+        verifyOtp(onboarding.email, code, "email")
+        authenticatedGatewayPost(
+            "/auth/onboarding/complete",
+            JSONObject().put("username", username.trim()).put("displayName", displayName.trim())
+                .put("avatarUrl", if (avatar?.startsWith("data:") == true) JSONObject.NULL else avatar ?: JSONObject.NULL),
+        )
+        refreshProfile()
+        if (avatar?.startsWith("data:image/") == true && _state.value is AuthState.SignedIn)
+            updateProfile(displayName, "", avatar)
+    }
+
     suspend fun completePasswordRecovery(password: String) = withContext(Dispatchers.IO) {
         val token = accessToken() ?: throw IllegalStateException("The recovery link is invalid or expired")
         val request = Request.Builder().url(BuildConfig.SUPABASE_URL.trimEnd('/') + "/auth/v1/user")
@@ -143,18 +196,49 @@ class AuthRepository private constructor(context: Context) {
             val text = response.body.string()
             if (!response.isSuccessful) throw IllegalStateException(JSONObject(text.ifBlank { "{}" }).optString("msg", "Could not update password"))
         }
+        authenticatedGatewayPost("/auth/password-enabled", JSONObject())
         refreshProfile()
     }
 
     suspend fun cancelPasswordRecovery() { signOut() }
 
     private fun gatewayPost(path: String, body: JSONObject): JSONObject {
+        val (status, value) = gatewayResponse(path, body)
+        if (status !in 200..299) throw IllegalStateException(value.optString("error", "Account service request failed"))
+        return value
+    }
+
+    private fun gatewayResponse(path: String, body: JSONObject): Pair<Int, JSONObject> {
         val request = Request.Builder().url("$origin$path").post(body.toString().toRequestBody(jsonType)).build()
         client.newCall(request).execute().use { response ->
             val text = response.body.string()
             val value = JSONObject(text.ifBlank { "{}" })
+            return response.code to value
+        }
+    }
+
+    private fun authenticatedGatewayPost(path: String, body: JSONObject): JSONObject {
+        val token = accessToken() ?: throw IllegalStateException("Sign in is required")
+        val request = Request.Builder().url("$origin$path").header("Authorization", "Bearer $token")
+            .post(body.toString().toRequestBody(jsonType)).build()
+        client.newCall(request).execute().use { response ->
+            val value = JSONObject(response.body.string().ifBlank { "{}" })
             if (!response.isSuccessful) throw IllegalStateException(value.optString("error", "Account service request failed"))
             return value
+        }
+    }
+
+    private fun verifyOtp(email: String, code: String, type: String) {
+        val request = Request.Builder().url(BuildConfig.SUPABASE_URL.trimEnd('/') + "/auth/v1/verify")
+            .header("apikey", BuildConfig.SUPABASE_PUBLISHABLE_KEY)
+            .post(JSONObject().put("email", email.trim()).put("token", code.trim()).put("type", type).toString().toRequestBody(jsonType))
+            .build()
+        client.newCall(request).execute().use { response ->
+            val value = JSONObject(response.body.string().ifBlank { "{}" })
+            if (!response.isSuccessful) throw IllegalStateException(
+                value.optString("error_description", value.optString("msg", "The verification code is invalid or expired")),
+            )
+            storeTokens(value.getString("access_token"), value.getString("refresh_token"), value.optLong("expires_in", 3600))
         }
     }
 
@@ -213,6 +297,20 @@ class AuthRepository private constructor(context: Context) {
 
     suspend fun refreshProfile() = withContext(Dispatchers.IO) {
         val token = accessToken() ?: return@withContext
+        val onboardingRequest = Request.Builder().url("$origin/auth/onboarding").header("Authorization", "Bearer $token").build()
+        client.newCall(onboardingRequest).execute().use { response ->
+            val text = response.body.string()
+            if (!response.isSuccessful) throw IllegalStateException(JSONObject(text.ifBlank { "{}" }).optString("error", "Account status unavailable"))
+            val value = JSONObject(text)
+            if (value.optBoolean("required")) {
+                val profile = value.getJSONObject("profile")
+                _state.value = AuthState.Onboarding(
+                    value.getString("email"), profile.getString("username"), profile.getString("display_name"),
+                    profile.optString("avatar_url").takeIf(String::isNotBlank), value.optBoolean("creationVerified"),
+                )
+                return@withContext
+            }
+        }
         val request = Request.Builder().url("$origin/social/me").header("Authorization", "Bearer $token").build()
         client.newCall(request).execute().use { response ->
             val text = response.body.string()
