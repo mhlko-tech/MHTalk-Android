@@ -10,6 +10,45 @@ enum class ConnectionStatus {
 
 enum class ShareQuality { Low, Medium, High }
 
+enum class SubscriptionTier { Free, Plus }
+
+data class SubscriptionEntitlements(
+    val maxCameraQuality: ShareQuality,
+    val maxScreenShareQuality: ShareQuality,
+    val maxAttachmentBytes: Long,
+    val attachmentRetentionHours: Int,
+    val animatedProfile: Boolean,
+    val customAppearance: Boolean,
+    val customEmojiAndSoundboard: Boolean,
+    val customInvites: Boolean,
+    val savedRoomLimit: Int,
+)
+
+fun subscriptionEntitlements(tier: SubscriptionTier) = when (tier) {
+    SubscriptionTier.Free -> SubscriptionEntitlements(
+        maxCameraQuality = ShareQuality.Medium,
+        maxScreenShareQuality = ShareQuality.Medium,
+        maxAttachmentBytes = 20L * 1024 * 1024,
+        attachmentRetentionHours = 24,
+        animatedProfile = false,
+        customAppearance = false,
+        customEmojiAndSoundboard = false,
+        customInvites = false,
+        savedRoomLimit = 3,
+    )
+    SubscriptionTier.Plus -> SubscriptionEntitlements(
+        maxCameraQuality = ShareQuality.High,
+        maxScreenShareQuality = ShareQuality.High,
+        maxAttachmentBytes = 100L * 1024 * 1024,
+        attachmentRetentionHours = 24 * 7,
+        animatedProfile = true,
+        customAppearance = true,
+        customEmojiAndSoundboard = true,
+        customInvites = true,
+        savedRoomLimit = 20,
+    )
+}
+
 enum class StartupUpdatePhase { Checking, Downloading, ReadyToInstall, Error, Complete }
 
 data class UserProfile(
@@ -80,6 +119,10 @@ data class SessionUiState(
     val cameraSoundsEnabled: Boolean = true,
     val screenShareSoundsEnabled: Boolean = true,
     val screenSharePrivacyEnabled: Boolean = true,
+    val subscriptionTier: SubscriptionTier = SubscriptionTier.Free,
+    val rtcProvider: String = "livekit",
+    val messagingProvider: String = "livekit-data",
+    val fileProvider: String = "livekit-stream",
     val launchReady: Boolean = false,
     val launchUpdatePhase: StartupUpdatePhase = StartupUpdatePhase.Checking,
     val launchUpdateProgress: Int? = null,

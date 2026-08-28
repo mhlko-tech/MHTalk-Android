@@ -37,6 +37,8 @@ import com.mhlko.talk.data.SessionUiState
 import com.mhlko.talk.data.UserProfile
 import com.mhlko.talk.data.normalizeRoomAvatar
 import com.mhlko.talk.data.ShareQuality
+import com.mhlko.talk.data.SubscriptionTier
+import com.mhlko.talk.data.subscriptionEntitlements
 import com.mhlko.talk.data.StartupUpdatePhase
 import io.livekit.android.audio.ScreenAudioCapturer
 import io.livekit.android.audio.AudioBufferCallback
@@ -185,7 +187,19 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             runCatching {
                 if (_state.value.roomName != null) room.disconnect()
                 val credentials = api.credentials(roomName, inviteCode)
-                room.connect(BuildConfig.LIVEKIT_URL, credentials.token)
+                require(credentials.provider == "livekit") {
+                    "The selected call provider is not supported by this app version"
+                }
+                _state.update {
+                    it.copy(
+                        subscriptionTier = credentials.subscriptionTier,
+                        rtcProvider = credentials.provider,
+                        messagingProvider = credentials.messagingProvider,
+                        fileProvider = credentials.fileProvider,
+                    )
+                }
+                configureCameraQuality(credentials.subscriptionTier)
+                room.connect(credentials.serverUrl, credentials.token)
                 startCallService(camera = false, screenShare = false)
                 room.localParticipant.setMicrophoneEnabled(_state.value.microphoneEnabled)
                 sendProfile()
@@ -271,7 +285,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     fun startScreenShare(permissionData: Intent, includeMicrophone: Boolean, quality: ShareQuality) {
         if (_state.value.status != ConnectionStatus.Connected) return
         viewModelScope.launch {
-            configureShareQuality(quality)
+            val allowedQuality = if (
+                _state.value.subscriptionTier == SubscriptionTier.Free && quality == ShareQuality.High
+            ) ShareQuality.Medium else quality
+            configureShareQuality(allowedQuality)
             startCallService(_state.value.cameraEnabled, screenShare = true)
             runCatching {
                 room.localParticipant.setScreenShareEnabled(
@@ -387,6 +404,21 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             .mapNotNull { it.track as? RemoteAudioTrack }
             .forEach { it.setVolume(safeVolume / 100.0) }
         syncParticipants()
+    }
+
+    private fun configureCameraQuality(tier: SubscriptionTier) {
+        val preset = if (tier == SubscriptionTier.Plus) {
+            io.livekit.android.room.track.VideoPreset169.H1080
+        } else {
+            io.livekit.android.room.track.VideoPreset169.H720
+        }
+        room.videoTrackCaptureDefaults = io.livekit.android.room.track.LocalVideoTrackOptions(
+            captureParams = preset.capture,
+        )
+        room.videoTrackPublishDefaults = io.livekit.android.room.participant.VideoTrackPublishDefaults(
+            videoEncoding = preset.encoding,
+            simulcast = true,
+        )
     }
 
     fun reportUser(identity: String, message: ChatMessageUi? = null) {
@@ -566,6 +598,16 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 cursor.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 }?.let { size = cursor.getLong(it) }
             }
         }
+        val maximumBytes = subscriptionEntitlements(_state.value.subscriptionTier).maxAttachmentBytes
+        if (size > maximumBytes) {
+            val maximumMb = maximumBytes / 1024 / 1024
+            showFailure(
+                IllegalArgumentException(
+                    "${if (_state.value.subscriptionTier == SubscriptionTier.Plus) "MHTalk Plus" else "Free accounts"} can send files up to $maximumMb MB.",
+                ),
+            )
+            return
+        }
         val id = UUID.randomUUID().toString()
         val initial = ChatMessageUi(
             id = id,
@@ -594,8 +636,11 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         while (true) {
                             val count = input.read(buffer)
                             if (count < 0) break
-                            sender.write(buffer.copyOf(count)).getOrThrow()
                             sent += count
+                            require(sent <= maximumBytes) {
+                                "Attachment exceeds the ${maximumBytes / 1024 / 1024} MB plan limit"
+                            }
+                            sender.write(buffer.copyOf(count)).getOrThrow()
                             val progress = if (size > 0) (sent.toFloat() / size).coerceIn(0f, 1f) else 0f
                             patchAttachment(id) { it.copy(progress = progress) }
                         }
@@ -738,6 +783,11 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 val mimeType = resolver.getType(uri) ?: "image/jpeg"
                 require(mimeType.startsWith("image/")) { "Choose an image file" }
                 if (mimeType == "image/gif") {
+                    val tier = (auth.state.value as? com.mhlko.talk.auth.AuthState.SignedIn)
+                        ?.account?.subscriptionTier ?: SubscriptionTier.Free
+                    require(subscriptionEntitlements(tier).animatedProfile) {
+                        "Animated profile images are included with MHTalk Plus"
+                    }
                     val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
                         ?: error("Could not read profile image")
                     require(bytes.size <= 6 * 1024 * 1024) { "Animated profile image must be 6 MB or smaller" }
@@ -1279,7 +1329,19 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 val name = wantedRoom ?: break
                 val result = runCatching {
                     val credentials = api.credentials(name, wantedInviteCode)
-                    room.connect(BuildConfig.LIVEKIT_URL, credentials.token)
+                    require(credentials.provider == "livekit") {
+                        "The selected call provider is not supported by this app version"
+                    }
+                    _state.update {
+                        it.copy(
+                            subscriptionTier = credentials.subscriptionTier,
+                            rtcProvider = credentials.provider,
+                            messagingProvider = credentials.messagingProvider,
+                            fileProvider = credentials.fileProvider,
+                        )
+                    }
+                    configureCameraQuality(credentials.subscriptionTier)
+                    room.connect(credentials.serverUrl, credentials.token)
                     room.localParticipant.setMicrophoneEnabled(_state.value.microphoneEnabled)
                     sendProfile()
                     credentials.roomName

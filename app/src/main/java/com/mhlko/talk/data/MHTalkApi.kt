@@ -10,7 +10,15 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-data class RoomCredentials(val token: String, val roomName: String)
+data class RoomCredentials(
+    val token: String,
+    val roomName: String,
+    val provider: String,
+    val serverUrl: String,
+    val subscriptionTier: SubscriptionTier,
+    val messagingProvider: String,
+    val fileProvider: String,
+)
 data class PrivateRoom(val roomName: String, val code: String)
 
 class MHTalkApi(private val accessToken: () -> String? = { null }) {
@@ -30,6 +38,18 @@ class MHTalkApi(private val accessToken: () -> String? = { null }) {
         RoomCredentials(
             token = payload.requireString("token"),
             roomName = payload.requireString("roomName"),
+            provider = payload.optJSONObject("routing")?.optJSONObject("rtc")?.optString("provider")
+                ?.takeIf(String::isNotBlank) ?: payload.optString("provider", "livekit"),
+            serverUrl = payload.optJSONObject("routing")?.optJSONObject("rtc")?.optString("serverUrl")
+                ?.takeIf(String::isNotBlank) ?: payload.optString("serverUrl").takeIf(String::isNotBlank)
+                ?: BuildConfig.LIVEKIT_URL,
+            subscriptionTier = if (
+                payload.optJSONObject("subscription")?.optString("tier") == "plus"
+            ) SubscriptionTier.Plus else SubscriptionTier.Free,
+            messagingProvider = payload.optJSONObject("routing")?.optJSONObject("messaging")
+                ?.optString("provider")?.takeIf(String::isNotBlank) ?: "livekit-data",
+            fileProvider = payload.optJSONObject("routing")?.optJSONObject("files")
+                ?.optString("provider")?.takeIf(String::isNotBlank) ?: "livekit-stream",
         )
     }
 

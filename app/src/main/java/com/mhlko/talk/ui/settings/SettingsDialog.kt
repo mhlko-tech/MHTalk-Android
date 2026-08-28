@@ -10,11 +10,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mhlko.talk.data.SessionUiState
+import com.mhlko.talk.data.SubscriptionTier
+import com.mhlko.talk.data.subscriptionEntitlements
 import com.mhlko.talk.ui.theme.MHTalkMuted
 
 @Composable
 internal fun SettingsDialog(
     state: SessionUiState,
+    subscriptionTier: SubscriptionTier,
     onDismiss: () -> Unit,
     onOutput: (Int) -> Unit,
     onTestSpeaker: () -> Unit,
@@ -66,6 +69,31 @@ internal fun SettingsDialog(
                 Spacer(Modifier.height(18.dp))
                 Text("Screen-share privacy", fontWeight = FontWeight.Bold)
                 SettingSwitch("Keep notification protection", "Keep Android's privacy protection enabled while sharing. Android may still control this on some devices.", state.screenSharePrivacyEnabled, onScreenPrivacy)
+                Spacer(Modifier.height(18.dp))
+                val entitlements = subscriptionEntitlements(subscriptionTier)
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.34f),
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text("MHTalk ${if (subscriptionTier == SubscriptionTier.Plus) "Plus" else "Free"}", fontWeight = FontWeight.Bold)
+                        Text("Your current account plan", color = MHTalkMuted, fontSize = 11.sp)
+                        Text("• Clear voice calls and microphone noise cancellation", fontSize = 12.sp)
+                        Text("• Camera and screen sharing up to ${if (subscriptionTier == SubscriptionTier.Plus) "1080p" else "720p"}", fontSize = 12.sp)
+                        Text("• Files up to ${entitlements.maxAttachmentBytes / 1024 / 1024} MB", fontSize = 12.sp)
+                        if (subscriptionTier == SubscriptionTier.Plus) {
+                            Text("• Animated profiles, banners, themes and frames", fontSize = 12.sp)
+                            Text("• Custom emojis, stickers, soundboard and invites", fontSize = 12.sp)
+                        } else {
+                            Text(
+                                "Plus billing will appear here after store payments are connected. Core calling and safety features remain free.",
+                                color = MHTalkMuted,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
+                }
                 } }
             }
         },

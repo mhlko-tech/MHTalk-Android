@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import com.mhlko.talk.BuildConfig
+import com.mhlko.talk.data.SubscriptionTier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +35,7 @@ data class MHTalkAccount(
     val displayName: String,
     val avatarUrl: String? = null,
     val bio: String? = null,
+    val subscriptionTier: SubscriptionTier = SubscriptionTier.Free,
 )
 
 sealed interface AuthState {
@@ -357,14 +359,23 @@ class AuthRepository private constructor(context: Context) {
             val text = response.body.string()
             if (!response.isSuccessful) throw IllegalStateException(JSONObject(text).optString("error", "Profile unavailable"))
             val profile = JSONObject(text)
+            val subscriptionExpiry = profile.optString("subscription_expires_at")
+                .takeUnless { it.isBlank() || it == "null" }
             val account = MHTalkAccount(
                 id = profile.getString("id"), username = profile.getString("username"),
                 displayName = profile.getString("display_name"), avatarUrl = profile.optString("avatar_url").takeIf(String::isNotBlank),
                 bio = profile.optString("bio").takeIf(String::isNotBlank),
+                subscriptionTier = if (
+                    profile.optString("subscription_tier") == "plus" &&
+                    (subscriptionExpiry == null || runCatching {
+                        java.time.Instant.parse(subscriptionExpiry).toEpochMilli() > System.currentTimeMillis()
+                    }.getOrDefault(false))
+                ) SubscriptionTier.Plus else SubscriptionTier.Free,
             )
             preferences.edit().putString("account.id", account.id).putString("account.username", account.username)
                 .putString("account.name", account.displayName).putString("account.avatar", account.avatarUrl)
                 .putString("account.bio", account.bio).apply()
+            preferences.edit().putString("account.subscription", account.subscriptionTier.name).apply()
             _state.value = AuthState.SignedIn(account)
         }
     }
@@ -534,6 +545,9 @@ class AuthRepository private constructor(context: Context) {
             displayName = displayName,
             avatarUrl = preferences.getString("account.avatar", null)?.takeIf(String::isNotBlank),
             bio = preferences.getString("account.bio", null)?.takeIf(String::isNotBlank),
+            subscriptionTier = runCatching {
+                SubscriptionTier.valueOf(preferences.getString("account.subscription", SubscriptionTier.Free.name)!!)
+            }.getOrDefault(SubscriptionTier.Free),
         )
     }
 

@@ -79,6 +79,7 @@ import com.mhlko.talk.data.isImageAvatar
 import com.mhlko.talk.data.ChatMessageUi
 import com.mhlko.talk.data.ShareQuality
 import com.mhlko.talk.data.StartupUpdatePhase
+import com.mhlko.talk.data.SubscriptionTier
 import com.mhlko.talk.auth.AuthRepository
 import com.mhlko.talk.auth.AuthState
 import com.mhlko.talk.auth.SocialRepository
@@ -171,6 +172,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         )
         return
     }
+    val subscriptionTier = (authState as AuthState.SignedIn).account.subscriptionTier
     var permissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -348,6 +350,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     )
     if (showSettings) SettingsDialog(
         state = state,
+        subscriptionTier = subscriptionTier,
         onDismiss = { showSettings = false },
         onOutput = session::setOutputLevel,
         onTestSpeaker = session::testSpeaker,
@@ -377,6 +380,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         )
     }
     if (shareOptionsOpen) ShareOptionsDialog(
+        subscriptionTier = subscriptionTier,
         onDismiss = { shareOptionsOpen = false },
         onStart = { options ->
             pendingShareOptions = options
@@ -799,7 +803,11 @@ private fun ActiveRoom(
 private data class ShareOptions(val includeMicrophone: Boolean, val quality: ShareQuality)
 
 @Composable
-private fun ShareOptionsDialog(onDismiss: () -> Unit, onStart: (ShareOptions) -> Unit) {
+private fun ShareOptionsDialog(
+    subscriptionTier: SubscriptionTier,
+    onDismiss: () -> Unit,
+    onStart: (ShareOptions) -> Unit,
+) {
     var includeMic by remember { mutableStateOf(true) }
     var quality by remember { mutableStateOf(ShareQuality.Medium) }
     AlertDialog(
@@ -819,9 +827,13 @@ private fun ShareOptionsDialog(onDismiss: () -> Unit, onStart: (ShareOptions) ->
                 Spacer(Modifier.height(12.dp))
                 Text("Video quality", fontWeight = FontWeight.Bold)
                 ShareQuality.entries.forEach { option ->
-                    Row(Modifier.fillMaxWidth().clickable { quality = option }, verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(quality == option, { quality = option })
-                        Text(option.name)
+                    val enabled = option != ShareQuality.High || subscriptionTier == SubscriptionTier.Plus
+                    Row(
+                        Modifier.fillMaxWidth().clickable(enabled = enabled) { quality = option },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(quality == option, { quality = option }, enabled = enabled)
+                        Text(if (option == ShareQuality.High && !enabled) "High · 1080p · Plus" else option.name)
                     }
                 }
             }
