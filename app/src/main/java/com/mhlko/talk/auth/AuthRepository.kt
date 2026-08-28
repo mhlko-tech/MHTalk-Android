@@ -4,8 +4,10 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Base64
+import android.util.Log
 import com.mhlko.talk.BuildConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -15,6 +17,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -50,6 +54,19 @@ sealed interface AuthState {
     data class Failed(val message: String) : AuthState
 }
 
+private sealed interface RefreshOutcome {
+    data object Refreshed : RefreshOutcome
+    data object Missing : RefreshOutcome
+    data object Rejected : RefreshOutcome
+    data class Retryable(val cause: Throwable) : RefreshOutcome
+}
+
+private class AuthTokenRequestException(
+    val statusCode: Int,
+    val errorCode: String,
+    message: String,
+) : IllegalStateException(message)
+
 class AuthRepository private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences("mhtalk.auth", Context.MODE_PRIVATE)
@@ -62,6 +79,9 @@ class AuthRepository private constructor(context: Context) {
     private val _state = MutableStateFlow<AuthState>(if (configured) AuthState.Checking else AuthState.Unavailable)
     val state: StateFlow<AuthState> = _state.asStateFlow()
     private var refreshLoopStarted = false
+    private val refreshMutex = Mutex()
+    private var refreshRetryJob: Job? = null
+    private var profileRetryJob: Job? = null
 
     fun accessToken(): String? {
         val token = secrets.get("access_token") ?: return null
@@ -82,18 +102,31 @@ class AuthRepository private constructor(context: Context) {
                     delay(5 * 60_000L)
                     val expiresAt = preferences.getLong("expires_at", 0L)
                     if (secrets.get("refresh_token") != null && expiresAt < System.currentTimeMillis() + 10 * 60_000L) {
-                        refreshSession()
+                        if (refreshSession() is RefreshOutcome.Retryable) scheduleRefreshRetry()
                     }
                 }
             }
         }
         _state.value = AuthState.Checking
-        runCatching {
-            if (accessToken() == null && secrets.get("refresh_token") != null) refreshSession()
-            if (accessToken() != null) refreshProfile() else _state.value = AuthState.SignedOut
-        }.onFailure {
-            _state.value = AuthState.Failed(it.message ?: "Could not verify your account")
+        if (accessToken() == null && secrets.get("refresh_token") != null) {
+            when (refreshSession()) {
+                RefreshOutcome.Refreshed -> Unit
+                is RefreshOutcome.Retryable -> {
+                    cachedAccount()?.let { _state.value = AuthState.SignedIn(it) }
+                    scheduleRefreshRetry()
+                    return
+                }
+                RefreshOutcome.Missing, RefreshOutcome.Rejected -> {
+                    _state.value = AuthState.SignedOut
+                    return
+                }
+            }
         }
+        if (accessToken() == null) {
+            _state.value = AuthState.SignedOut
+            return
+        }
+        restoreProfileWithoutDroppingSession()
     }
 
     suspend fun login(identifier: String, password: String) = withContext(Dispatchers.IO) {
@@ -375,6 +408,8 @@ class AuthRepository private constructor(context: Context) {
     }
 
     suspend fun signOut() {
+        refreshRetryJob?.cancel()
+        profileRetryJob?.cancel()
         val token = accessToken()
         if (token != null) withContext(Dispatchers.IO) {
             val request = Request.Builder().url(BuildConfig.SUPABASE_URL.trimEnd('/') + "/auth/v1/logout")
@@ -387,14 +422,30 @@ class AuthRepository private constructor(context: Context) {
         _state.value = if (configured) AuthState.SignedOut else AuthState.Unavailable
     }
 
-    private suspend fun refreshSession() {
-        val refresh = secrets.get("refresh_token") ?: return
-        runCatching { tokenRequest("refresh_token", JSONObject().put("refresh_token", refresh)) }
-            .onFailure {
-                preferences.edit().clear().apply()
-                secrets.clear()
-                _state.value = AuthState.SignedOut
+    private suspend fun refreshSession(): RefreshOutcome {
+        val observedRefreshToken = secrets.get("refresh_token") ?: return RefreshOutcome.Missing
+        return refreshMutex.withLock {
+            val currentRefreshToken = secrets.get("refresh_token") ?: return@withLock RefreshOutcome.Missing
+            if (currentRefreshToken != observedRefreshToken && accessToken() != null) {
+                return@withLock RefreshOutcome.Refreshed
             }
+            try {
+                tokenRequest("refresh_token", JSONObject().put("refresh_token", currentRefreshToken))
+                RefreshOutcome.Refreshed
+            } catch (error: Throwable) {
+                val requestError = error as? AuthTokenRequestException
+                val failureKind = sessionFailureKind(requestError?.statusCode, requestError?.errorCode, error.message)
+                if (failureKind == SessionFailureKind.TERMINAL) {
+                    Log.w(TAG, "Supabase rejected the stored session; interactive sign-in is required")
+                    clearLocalSession()
+                    _state.value = AuthState.SignedOut
+                    RefreshOutcome.Rejected
+                } else {
+                    Log.w(TAG, "Session refresh interrupted; preserving the local session", error)
+                    RefreshOutcome.Retryable(error)
+                }
+            }
+        }
     }
 
     private suspend fun tokenRequest(grantType: String, payload: JSONObject) = withContext(Dispatchers.IO) {
@@ -405,16 +456,90 @@ class AuthRepository private constructor(context: Context) {
         client.newCall(request).execute().use { response ->
             val text = response.body.string()
             val body = JSONObject(text.ifBlank { "{}" })
-            if (!response.isSuccessful) throw IllegalStateException(body.optString("error_description", body.optString("msg", "Sign-in failed")))
+            if (!response.isSuccessful) {
+                throw AuthTokenRequestException(
+                    response.code,
+                    body.optString("error_code", body.optString("code")),
+                    body.optString("error_description", body.optString("msg", "Sign-in failed")),
+                )
+            }
             val expiresIn = body.optLong("expires_in", 3600)
             storeTokens(body.getString("access_token"), body.getString("refresh_token"), expiresIn)
         }
     }
 
     private fun storeTokens(accessToken: String, refreshToken: String, expiresIn: Long) {
-        secrets.put("access_token", accessToken)
-        secrets.put("refresh_token", refreshToken)
-        preferences.edit().putLong("expires_at", System.currentTimeMillis() + expiresIn * 1000).apply()
+        secrets.putAll(mapOf("access_token" to accessToken, "refresh_token" to refreshToken))
+        check(preferences.edit().putLong("expires_at", System.currentTimeMillis() + expiresIn * 1000).commit()) {
+            "Could not persist the session expiry"
+        }
+    }
+
+    private fun scheduleRefreshRetry() {
+        if (refreshRetryJob?.isActive == true) return
+        refreshRetryJob = scope.launch {
+            var attempt = 0
+            while (isActive && secrets.get("refresh_token") != null) {
+                delay(sessionRetryDelayMs(attempt++))
+                when (refreshSession()) {
+                    RefreshOutcome.Refreshed -> {
+                        if (_state.value !is AuthState.SignedIn) restoreProfileWithoutDroppingSession()
+                        return@launch
+                    }
+                    is RefreshOutcome.Retryable -> Unit
+                    RefreshOutcome.Missing, RefreshOutcome.Rejected -> return@launch
+                }
+            }
+        }
+    }
+
+    private suspend fun restoreProfileWithoutDroppingSession() {
+        val cached = cachedAccount()
+        runCatching { refreshProfile() }
+            .onFailure { error ->
+                if (cached != null) {
+                    _state.value = AuthState.SignedIn(cached)
+                    scheduleProfileRetry()
+                } else {
+                    _state.value = AuthState.Failed(error.message ?: "Could not verify your account")
+                }
+            }
+    }
+
+    private fun scheduleProfileRetry() {
+        if (profileRetryJob?.isActive == true) return
+        profileRetryJob = scope.launch {
+            var attempt = 0
+            while (isActive && secrets.get("refresh_token") != null) {
+                delay(sessionRetryDelayMs(attempt++))
+                if (accessToken() == null) {
+                    when (refreshSession()) {
+                        RefreshOutcome.Refreshed -> Unit
+                        is RefreshOutcome.Retryable -> continue
+                        RefreshOutcome.Missing, RefreshOutcome.Rejected -> return@launch
+                    }
+                }
+                if (runCatching { refreshProfile() }.isSuccess) return@launch
+            }
+        }
+    }
+
+    private fun cachedAccount(): MHTalkAccount? {
+        val id = preferences.getString("account.id", null)?.takeIf(String::isNotBlank) ?: return null
+        val username = preferences.getString("account.username", null)?.takeIf(String::isNotBlank) ?: return null
+        val displayName = preferences.getString("account.name", null)?.takeIf(String::isNotBlank) ?: return null
+        return MHTalkAccount(
+            id = id,
+            username = username,
+            displayName = displayName,
+            avatarUrl = preferences.getString("account.avatar", null)?.takeIf(String::isNotBlank),
+            bio = preferences.getString("account.bio", null)?.takeIf(String::isNotBlank),
+        )
+    }
+
+    private fun clearLocalSession() {
+        preferences.edit().clear().apply()
+        secrets.clear()
     }
 
     private fun migrateLegacySecrets() {
@@ -430,6 +555,7 @@ class AuthRepository private constructor(context: Context) {
     }
 
     companion object {
+        private const val TAG = "MHTalkAuth"
         @Volatile private var instance: AuthRepository? = null
         fun get(context: Context): AuthRepository = instance ?: synchronized(this) {
             instance ?: AuthRepository(context).also { instance = it }

@@ -32,6 +32,18 @@ internal class SecureTokenStore(context: Context) {
     }
 
     fun put(key: String, value: String) {
+        preferences.edit().putString(key, encrypt(value)).apply()
+    }
+
+    /** Saves a rotated token pair in one preferences transaction. */
+    fun putAll(values: Map<String, String>) {
+        val encrypted = values.mapValues { (_, value) -> encrypt(value) }
+        val editor = preferences.edit()
+        encrypted.forEach { (key, value) -> editor.putString(key, value) }
+        check(editor.commit()) { "Could not persist the secure session" }
+    }
+
+    private fun encrypt(value: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
         val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
@@ -39,7 +51,7 @@ internal class SecureTokenStore(context: Context) {
         packed[0] = cipher.iv.size.toByte()
         cipher.iv.copyInto(packed, 1)
         encrypted.copyInto(packed, 1 + cipher.iv.size)
-        preferences.edit().putString(key, Base64.encodeToString(packed, Base64.NO_WRAP)).apply()
+        return Base64.encodeToString(packed, Base64.NO_WRAP)
     }
 
     fun get(key: String): String? = runCatching {
