@@ -418,6 +418,11 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         )
     }
     state.privateCode?.let { code ->
+        val copyPrivateCode: () -> Unit = {
+            context.getSystemService(ClipboardManager::class.java)
+                .setPrimaryClip(ClipData.newPlainText("MHTalk private code", code))
+            session.showNotice("Code copied")
+        }
         AlertDialog(
             onDismissRequest = session::clearPrivateCode,
             title = { Text("Private room created") },
@@ -425,12 +430,18 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                 Column {
                     Text("Send this code to your friend:", color = MHTalkMuted)
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(code, color = MHTalkPurple, fontWeight = FontWeight.Black, fontSize = 24.sp, modifier = Modifier.weight(1f))
-                        IconButton(onClick = {
-                            context.getSystemService(ClipboardManager::class.java)
-                                .setPrimaryClip(ClipData.newPlainText("MHTalk private code", code))
-                            session.showNotice("Code copied")
-                        }) { Icon(Icons.Rounded.ContentCopy, "Copy code") }
+                        Text(
+                            code,
+                            color = MHTalkPurple,
+                            fontWeight = FontWeight.Black,
+                            fontSize = 24.sp,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable(onClick = copyPrivateCode),
+                        )
+                        IconButton(onClick = copyPrivateCode) {
+                            Icon(Icons.Rounded.ContentCopy, "Copy code")
+                        }
                     }
                 }
             },
