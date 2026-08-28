@@ -1730,8 +1730,8 @@ private fun SupportDialog(
         },
         text = {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                item { Text("MHTalk currently uses carefully selected free service allocations. Connecting may take a little longer while the app selects a compatible server.", color = MHTalkMuted) }
-                item { Text("An active room stays on one provider so its members remain together. This version only accepts server adapters it can actually use.", color = MHTalkMuted) }
+                item { Text("MHTalk Beta currently uses LiveKit for calls. Its free monthly capacity can pause new connections until the quota resets.", color = MHTalkMuted) }
+                item { Text("The safe multi-provider broker is ready, but another call provider will not be activated until its credentials and tested Windows/Android adapters are installed. We never pretend an unavailable provider is usable.", color = MHTalkMuted) }
                 item {
                     Surface(color = Color(0xFF222944), shape = RoundedCornerShape(12.dp)) {
                         Column(Modifier.padding(14.dp)) {
