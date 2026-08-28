@@ -33,6 +33,9 @@ class MHTalkApi(private val accessToken: () -> String? = { null }) {
         BuildConfig.TOKEN_ENDPOINT,
         JSONObject().put("roomName", roomName).apply {
             if (!inviteCode.isNullOrBlank()) put("inviteCode", inviteCode.trim().uppercase())
+            put("clientPlatform", "android")
+            put("clientVersion", BuildConfig.VERSION_NAME)
+            put("supportedRtcProviders", org.json.JSONArray().put("livekit"))
         },
     ).let { payload ->
         RoomCredentials(

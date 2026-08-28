@@ -107,6 +107,7 @@ data class SessionUiState(
     val mainActiveCount: Int = 0,
     val privateCode: String? = null,
     val error: String? = null,
+    val connectionMessage: String? = null,
     val notice: String? = null,
     val localProfile: UserProfile = UserProfile(),
     val outputLevel: Int = 100,

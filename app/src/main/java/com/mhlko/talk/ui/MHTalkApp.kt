@@ -69,10 +69,12 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import com.mhlko.talk.BuildConfig
 import com.mhlko.talk.call.SessionViewModel
 import com.mhlko.talk.data.ConnectionStatus
 import com.mhlko.talk.data.MemberUi
+import com.mhlko.talk.data.MembershipService
 import com.mhlko.talk.data.SessionUiState
 import com.mhlko.talk.data.UserProfile
 import com.mhlko.talk.data.isImageAvatar
@@ -215,6 +217,9 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     var showSettings by remember { mutableStateOf(false) }
     var showFriends by remember { mutableStateOf(false) }
     var showHelp by remember { mutableStateOf(false) }
+    var showSupport by remember { mutableStateOf(false) }
+    var membershipMessage by remember { mutableStateOf("") }
+    var membershipSyncedAccount by remember { mutableStateOf<String?>(null) }
     var shareOptionsOpen by remember { mutableStateOf(false) }
     var pendingProfilePhoto by remember { mutableStateOf<Uri?>(null) }
     var cropSubmitted by remember { mutableStateOf(false) }
@@ -238,6 +243,13 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
             ),
             syncAccount = false,
         )
+        if (membershipSyncedAccount != signedIn.account.id) {
+            membershipSyncedAccount = signedIn.account.id
+            auth.accessToken()?.let { token ->
+                runCatching { MembershipService.sync(context, token) }
+                    .onSuccess { if (it != null && !it.pending) auth.refreshProfile() }
+            }
+        }
     }
     LaunchedEffect(state.profilePhotoRevision, cropSubmitted) {
         if (cropSubmitted && state.profilePhotoRevision > cropStartRevision) {
@@ -259,6 +271,8 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                 state = state,
                 onEditProfile = { showProfile = true },
                 onFriends = { showFriends = true; appScope.launch { social.refresh() } },
+                friendRequestCount = socialState.requests.size,
+                onSupport = { showSupport = true },
                 onSettings = { showSettings = true },
                 onHelp = { showHelp = true },
                 onReport = {
@@ -295,6 +309,20 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                     },
                 )
                 else -> RoomChat(state, session)
+            }
+        }
+    }
+
+    if (state.status == ConnectionStatus.Connecting || state.status == ConnectionStatus.Recovering) {
+        Dialog(onDismissRequest = {}) {
+            Surface(color = MHTalkSurfaceRaised, shape = RoundedCornerShape(22.dp), tonalElevation = 8.dp) {
+                Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = MHTalkPurple)
+                    Spacer(Modifier.height(16.dp))
+                    Text(if (state.status == ConnectionStatus.Recovering) "Reconnecting to the server" else "Connecting to the server", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp)
+                    Spacer(Modifier.height(7.dp))
+                    Text(state.connectionMessage ?: "Please wait while MHTalk selects a compatible service.", color = MHTalkMuted, fontSize = 12.sp)
+                }
             }
         }
     }
@@ -363,6 +391,53 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         onScreenPrivacy = session::setScreenSharePrivacy,
     )
     if (showHelp) HelpDialog(onDismiss = { showHelp = false })
+    if (showSupport) SupportDialog(
+        onDismiss = { showSupport = false },
+        onOpenLava = {
+            appScope.launch {
+                val accessToken = auth.accessToken()
+                if (accessToken == null) {
+                    membershipMessage = "Sign in before starting a membership."
+                    return@launch
+                }
+                runCatching { MembershipService.createLavaSession(context, accessToken) }
+                    .onSuccess {
+                        membershipMessage = "Complete payment in your browser, then return and choose Verify membership."
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it)))
+                    }
+                    .onFailure { session.showNotice(it.message ?: "Could not open LAVA membership") }
+            }
+        },
+        membershipMessage = membershipMessage,
+        onVerify = {
+            appScope.launch {
+                val accessToken = auth.accessToken()
+                if (accessToken == null) {
+                    membershipMessage = "Sign in before verifying a membership."
+                    return@launch
+                }
+                runCatching { MembershipService.sync(context, accessToken) }
+                    .onSuccess { result ->
+                        membershipMessage = when {
+                            result == null -> "Start a LAVA membership first."
+                            result.tier == SubscriptionTier.Plus -> "MHTalk Plus is active on this account."
+                            result.pending -> "Payment confirmation is still pending."
+                            else -> "No active LAVA membership was found."
+                        }
+                        if (result != null && !result.pending) auth.refreshProfile()
+                    }
+                    .onFailure { membershipMessage = it.message ?: "Could not verify membership" }
+            }
+        },
+        onOpenPatreon = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.patreon.com/cw/MhlkoVD/membership"))) },
+        onDownloadMvDownloader = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/mhlko-tech/MVDownloader/releases/latest"))) },
+        onShare = {
+            context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, "Try MHTalk Beta for voice, video, rooms and chat: https://github.com/mhlko-tech/MHTalk-Android/releases/latest")
+            }, "Share MHTalk"))
+        },
+    )
     socialState.invite?.let { invite ->
         val sender = socialState.friends.firstOrNull { it.id == invite.senderId }
         AlertDialog(
@@ -485,7 +560,11 @@ private fun LaunchScreen(
                 Text("M", color = Color.White, fontSize = 60.sp, fontWeight = FontWeight.Black)
             }
             Spacer(Modifier.height(18.dp))
-            Text("MHTalk ${BuildConfig.VERSION_NAME}", color = MHTalkText, fontWeight = FontWeight.ExtraBold, fontSize = 26.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("MHTalk ${BuildConfig.VERSION_NAME}", color = MHTalkText, fontWeight = FontWeight.ExtraBold, fontSize = 26.sp)
+                Spacer(Modifier.width(8.dp))
+                BetaBadge()
+            }
             Spacer(Modifier.height(13.dp))
             Text(state.launchUpdateMessage, color = MHTalkMuted, fontSize = 13.sp)
             Spacer(Modifier.height(15.dp))
@@ -525,6 +604,8 @@ private fun Header(
     state: SessionUiState,
     onEditProfile: () -> Unit,
     onFriends: () -> Unit,
+    friendRequestCount: Int,
+    onSupport: () -> Unit,
     onSettings: () -> Unit,
     onHelp: () -> Unit,
     onReport: () -> Unit,
@@ -542,8 +623,28 @@ private fun Header(
             fontSize = 13.sp,
         )
         Column(Modifier.padding(start = 12.dp).weight(1f)) {
-            Text(if (state.roomName == null) "MHTalk ${BuildConfig.VERSION_NAME}" else if (state.roomName == "Main") "Main channel" else "Private channel", fontWeight = FontWeight.ExtraBold, fontSize = 21.sp)
+            if (state.roomName == null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("MHTalk ${BuildConfig.VERSION_NAME}", fontWeight = FontWeight.ExtraBold, fontSize = 21.sp)
+                    Spacer(Modifier.width(7.dp))
+                    BetaBadge()
+                }
+            } else {
+                Text(if (state.roomName == "Main") "Main channel" else "Private channel", fontWeight = FontWeight.ExtraBold, fontSize = 21.sp)
+            }
             Text(statusText(state.status), color = statusColor(state.status), fontSize = 12.sp)
+        }
+        BadgedBox(
+            badge = {
+                if (friendRequestCount > 0) Badge(containerColor = Color(0xFFE43B55)) {
+                    Text(if (friendRequestCount > 99) "99+" else friendRequestCount.toString())
+                }
+            },
+        ) {
+            IconButton(onFriends) { Icon(Icons.Rounded.People, "Friends") }
+        }
+        IconButton(onSupport) {
+            Icon(Icons.AutoMirrored.Rounded.HelpOutline, "Beta servers and support", tint = Color(0xFFFFD75A))
         }
         Box {
             IconButton({ menuOpen = true }) { Icon(Icons.Rounded.MoreHoriz, "Profile and settings") }
@@ -552,11 +653,6 @@ private fun Header(
                     text = { Text("Edit profile") },
                     leadingIcon = { Icon(Icons.Rounded.Person, null) },
                     onClick = { menuOpen = false; onEditProfile() },
-                )
-                DropdownMenuItem(
-                    text = { Text("Friends") },
-                    leadingIcon = { Icon(Icons.Rounded.People, null) },
-                    onClick = { menuOpen = false; onFriends() },
                 )
                 DropdownMenuItem(
                     text = { Text("Settings") },
@@ -1610,6 +1706,67 @@ private fun formatBytes(size: Long): String = when {
 
 
 
+
+@Composable
+private fun SupportDialog(
+    onDismiss: () -> Unit,
+    onOpenLava: () -> Unit,
+    membershipMessage: String,
+    onVerify: () -> Unit,
+    onOpenPatreon: () -> Unit,
+    onDownloadMvDownloader: () -> Unit,
+    onShare: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(color = Color(0xFF4C401B), shape = RoundedCornerShape(12.dp)) {
+                    Text("?", color = Color(0xFFFFDC67), fontWeight = FontWeight.Black, fontSize = 23.sp, modifier = Modifier.padding(horizontal = 15.dp, vertical = 8.dp))
+                }
+                Spacer(Modifier.width(12.dp))
+                Column { Text("MHTalk Beta", fontWeight = FontWeight.Bold); Text("Zero-budget public testing", color = MHTalkMuted, fontSize = 11.sp) }
+            }
+        },
+        text = {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                item { Text("MHTalk currently uses carefully selected free service allocations. Connecting may take a little longer while the app selects a compatible server.", color = MHTalkMuted) }
+                item { Text("An active room stays on one provider so its members remain together. This version only accepts server adapters it can actually use.", color = MHTalkMuted) }
+                item {
+                    Surface(color = Color(0xFF222944), shape = RoundedCornerShape(12.dp)) {
+                        Column(Modifier.padding(14.dp)) {
+                            Text("You can help without paying.", fontWeight = FontWeight.Bold)
+                            Text("Sharing MHTalk is one of the most useful ways to help this small project reach sustainable hosting.", color = MHTalkMuted, fontSize = 12.sp)
+                        }
+                    }
+                }
+                item { Text("One active membership is planned to unlock premium features in both MHTalk and MVDownloader.", color = MHTalkMuted, fontSize = 12.sp) }
+                if (membershipMessage.isNotBlank()) item {
+                    Surface(color = Color(0xFF172C26), shape = RoundedCornerShape(10.dp)) {
+                        Text(membershipMessage, color = MHTalkGreen, fontSize = 12.sp, modifier = Modifier.padding(12.dp))
+                    }
+                }
+                item { Button(onOpenLava, Modifier.fillMaxWidth()) { Text("Support with LAVA") } }
+                item { OutlinedButton(onVerify, Modifier.fillMaxWidth()) { Text("Verify membership") } }
+                item { OutlinedButton(onOpenPatreon, Modifier.fillMaxWidth()) { Text("View Patreon plans") } }
+                item { OutlinedButton(onDownloadMvDownloader, Modifier.fillMaxWidth()) { Text("Download MVDownloader") } }
+                item { OutlinedButton(onShare, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Share, null); Spacer(Modifier.width(8.dp)); Text("Share MHTalk") } }
+            }
+        },
+        confirmButton = { TextButton(onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
+private fun BetaBadge() {
+    Surface(
+        color = Color(0xFF5B4AC6),
+        shape = RoundedCornerShape(50),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF8D7CFF)),
+    ) {
+        Text("BETA", color = Color(0xFFFFF7CA), fontSize = 9.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp))
+    }
+}
 
 @Composable
 private fun HelpDialog(onDismiss: () -> Unit) {

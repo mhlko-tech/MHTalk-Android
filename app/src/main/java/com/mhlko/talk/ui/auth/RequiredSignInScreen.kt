@@ -131,7 +131,13 @@ internal fun RequiredSignInScreen(authState: AuthState, auth: AuthRepository, on
                         ), contentAlignment = Alignment.Center,
                     ) { Text("M", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Black) }
                     Column {
-                        Text("MHTalk", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Black)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("MHTalk", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Black)
+                            Spacer(Modifier.width(8.dp))
+                            Surface(color = Color(0xFF5B4AC6), shape = RoundedCornerShape(50), border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF8D7CFF))) {
+                                Text("BETA", color = Color(0xFFFFF7CA), fontSize = 9.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp))
+                            }
+                        }
                         Text("Voice, video and rooms · v${BuildConfig.VERSION_NAME}", color = MHTalkMuted, fontSize = 11.sp)
                     }
                 }
@@ -378,4 +384,3 @@ internal fun RequiredSignInScreen(authState: AuthState, auth: AuthRepository, on
         }
     }
 }
-

@@ -87,7 +87,7 @@ internal fun SettingsDialog(
                             Text("• Custom emojis, stickers, soundboard and invites", fontSize = 12.sp)
                         } else {
                             Text(
-                                "Plus billing will appear here after store payments are connected. Core calling and safety features remain free.",
+                                "Use the yellow help button beside Friends to view LAVA and Patreon support options. Core calling and safety features remain free.",
                                 color = MHTalkMuted,
                                 fontSize = 11.sp,
                             )

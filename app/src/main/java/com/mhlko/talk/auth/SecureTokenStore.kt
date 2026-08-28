@@ -11,7 +11,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /** Stores session secrets encrypted with a non-exportable Android Keystore key. */
-internal class SecureTokenStore(context: Context) {
+class SecureTokenStore(context: Context) {
     private val preferences = context.getSharedPreferences("mhtalk.auth.secure", Context.MODE_PRIVATE)
     private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 

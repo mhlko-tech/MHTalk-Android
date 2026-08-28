@@ -72,6 +72,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.util.UUID
 import java.io.File
@@ -161,8 +162,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     fun createPrivate() {
         viewModelScope.launch {
-            _state.update { it.copy(status = ConnectionStatus.Connecting, error = null) }
-            runCatching { api.createPrivateRoom() }
+            _state.update { it.copy(status = ConnectionStatus.Connecting, error = null, connectionMessage = "Selecting the best available server…") }
+            runCatching { withTimeout(12_000) { api.createPrivateRoom() } }
                 .onSuccess { private ->
                     // Creating the invite and connecting are two consecutive stages.
                     // Return to idle so the duplicate-tap guard does not block stage two.
@@ -183,10 +184,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             userLeft = false
             wantedRoom = roomName
             wantedInviteCode = inviteCode
-            _state.update { it.copy(status = ConnectionStatus.Connecting, error = null) }
+            _state.update { it.copy(status = ConnectionStatus.Connecting, error = null, connectionMessage = "Selecting the best available server…") }
             runCatching {
                 if (_state.value.roomName != null) room.disconnect()
-                val credentials = api.credentials(roomName, inviteCode)
+                val credentials = withTimeout(12_000) { api.credentials(roomName, inviteCode) }
                 require(credentials.provider == "livekit") {
                     "The selected call provider is not supported by this app version"
                 }
@@ -196,10 +197,11 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         rtcProvider = credentials.provider,
                         messagingProvider = credentials.messagingProvider,
                         fileProvider = credentials.fileProvider,
+                        connectionMessage = "Connecting through ${credentials.provider}…",
                     )
                 }
                 configureCameraQuality(credentials.subscriptionTier)
-                room.connect(credentials.serverUrl, credentials.token)
+                withTimeout(18_000) { room.connect(credentials.serverUrl, credentials.token) }
                 startCallService(camera = false, screenShare = false)
                 room.localParticipant.setMicrophoneEnabled(_state.value.microphoneEnabled)
                 sendProfile()
@@ -210,6 +212,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         status = ConnectionStatus.Connected,
                         roomName = actualRoom,
                         error = null,
+                        connectionMessage = null,
                         messages = emptyList(),
                     )
                 }
@@ -1321,14 +1324,14 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     private fun scheduleRecovery() {
         if (_state.value.status == ConnectionStatus.Recovering) return
-        _state.update { it.copy(status = ConnectionStatus.Recovering, error = null) }
+        _state.update { it.copy(status = ConnectionStatus.Recovering, error = null, connectionMessage = "Reconnecting through an available server…") }
         viewModelScope.launch {
             var delayMs = 600L
             while (isActive && !userLeft && wantedRoom != null) {
                 delay(delayMs)
                 val name = wantedRoom ?: break
                 val result = runCatching {
-                    val credentials = api.credentials(name, wantedInviteCode)
+                    val credentials = withTimeout(12_000) { api.credentials(name, wantedInviteCode) }
                     require(credentials.provider == "livekit") {
                         "The selected call provider is not supported by this app version"
                     }
@@ -1338,17 +1341,18 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                             rtcProvider = credentials.provider,
                             messagingProvider = credentials.messagingProvider,
                             fileProvider = credentials.fileProvider,
+                            connectionMessage = "Connecting through ${credentials.provider}…",
                         )
                     }
                     configureCameraQuality(credentials.subscriptionTier)
-                    room.connect(credentials.serverUrl, credentials.token)
+                    withTimeout(18_000) { room.connect(credentials.serverUrl, credentials.token) }
                     room.localParticipant.setMicrophoneEnabled(_state.value.microphoneEnabled)
                     sendProfile()
                     credentials.roomName
                 }
                 if (result.isSuccess) {
                     _state.update {
-                        it.copy(status = ConnectionStatus.Connected, roomName = result.getOrNull(), error = null)
+                        it.copy(status = ConnectionStatus.Connected, roomName = result.getOrNull(), error = null, connectionMessage = null)
                     }
                     syncParticipants()
                     break
@@ -1387,6 +1391,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 status = if (it.roomName == null) ConnectionStatus.Failed else it.status,
                 error = error.message ?: "Unexpected connection error",
+                connectionMessage = null,
             )
         }
     }
