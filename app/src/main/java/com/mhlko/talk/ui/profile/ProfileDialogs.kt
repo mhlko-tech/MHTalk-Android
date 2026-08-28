@@ -80,7 +80,6 @@ internal fun ProfileDialog(
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Name") },
                     singleLine = true,
-                    supportingText = { Text("يدعم الأسماء العربية والإنجليزية", color = MHTalkMuted) },
                 )
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
