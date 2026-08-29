@@ -12,9 +12,13 @@ import java.util.concurrent.TimeUnit
 
 data class RoomCredentials(
     val token: String,
+    val identity: String?,
+    val screenToken: String?,
+    val screenIdentity: String?,
     val roomName: String,
     val provider: String,
     val serverUrl: String,
+    val clientKey: String?,
     val subscriptionTier: SubscriptionTier,
     val messagingProvider: String,
     val fileProvider: String,
@@ -29,23 +33,35 @@ class MHTalkApi(private val accessToken: () -> String? = { null }) {
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val origin = BuildConfig.TOKEN_ENDPOINT.substringBefore("/livekit/token")
 
-    suspend fun credentials(roomName: String, inviteCode: String?): RoomCredentials = post(
+    suspend fun credentials(
+        roomName: String,
+        inviteCode: String?,
+        supportedRtcProviders: List<String>,
+    ): RoomCredentials = post(
         BuildConfig.TOKEN_ENDPOINT,
         JSONObject().put("roomName", roomName).apply {
             if (!inviteCode.isNullOrBlank()) put("inviteCode", inviteCode.trim().uppercase())
             put("clientPlatform", "android")
             put("clientVersion", BuildConfig.VERSION_NAME)
-            put("supportedRtcProviders", org.json.JSONArray().put("livekit"))
+            put(
+                "supportedRtcProviders",
+                org.json.JSONArray().apply { supportedRtcProviders.forEach(::put) },
+            )
         },
     ).let { payload ->
         RoomCredentials(
             token = payload.requireString("token"),
+            identity = payload.optString("identity").takeIf(String::isNotBlank),
+            screenToken = payload.optString("screenToken").takeIf(String::isNotBlank),
+            screenIdentity = payload.optString("screenIdentity").takeIf(String::isNotBlank),
             roomName = payload.requireString("roomName"),
             provider = payload.optJSONObject("routing")?.optJSONObject("rtc")?.optString("provider")
                 ?.takeIf(String::isNotBlank) ?: payload.optString("provider", "livekit"),
             serverUrl = payload.optJSONObject("routing")?.optJSONObject("rtc")?.optString("serverUrl")
                 ?.takeIf(String::isNotBlank) ?: payload.optString("serverUrl").takeIf(String::isNotBlank)
                 ?: BuildConfig.LIVEKIT_URL,
+            clientKey = payload.optJSONObject("routing")?.optJSONObject("rtc")
+                ?.optString("clientKey")?.takeIf(String::isNotBlank),
             subscriptionTier = if (
                 payload.optJSONObject("subscription")?.optString("tier") == "plus"
             ) SubscriptionTier.Plus else SubscriptionTier.Free,

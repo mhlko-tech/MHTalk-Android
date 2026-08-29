@@ -19,8 +19,8 @@ android {
         applicationId = "com.mhlko.talk"
         minSdk = 26
         targetSdk = 36
-        versionCode = 21
-        versionName = "1.5.12"
+        versionCode = 22
+        versionName = "1.5.13"
 
         buildConfigField("String", "LIVEKIT_URL", "\"wss://mhtalkremake-utuei6i7.livekit.cloud\"")
         buildConfigField("String", "TOKEN_ENDPOINT", "\"https://mhtalk-token-service.mhlkotalk.workers.dev/livekit/token\"")
@@ -100,7 +100,18 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.3.0")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-    implementation("io.livekit:livekit-android:2.28.0")
+    implementation("io.livekit:livekit-android:2.28.0") {
+        exclude(group = "com.github.davidliu", module = "audioswitch")
+    }
+    implementation("io.getstream:stream-video-android-core:1.31.0") {
+        exclude(group = "com.twilio", module = "audioswitch")
+    }
+    implementation("io.getstream:stream-video-android-ui-compose:1.31.0") {
+        exclude(group = "com.twilio", module = "audioswitch")
+    }
+    implementation("io.agora.rtc:full-sdk:4.6.3")
+    implementation("com.tencent.liteav:LiteAVSDK_TRTC:13.4.0.20477")
+    implementation(files("libs/audioswitch-livekit-stream-compat.aar"))
     implementation(platform("com.google.firebase:firebase-bom:34.17.0"))
     implementation("com.google.firebase:firebase-messaging")
 

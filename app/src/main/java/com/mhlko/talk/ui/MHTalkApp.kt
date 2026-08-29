@@ -20,6 +20,13 @@ import android.net.Uri
 import android.util.Rational
 import android.widget.MediaController
 import android.widget.VideoView
+import android.webkit.CookieManager
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -72,6 +79,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import com.mhlko.talk.BuildConfig
 import com.mhlko.talk.call.SessionViewModel
+import com.mhlko.talk.call.AgoraRtcSession
+import com.mhlko.talk.call.TencentRtcSession
+import com.mhlko.talk.call.CloudflareRtcSession
 import com.mhlko.talk.data.ConnectionStatus
 import com.mhlko.talk.data.MemberUi
 import com.mhlko.talk.data.MembershipService
@@ -91,6 +101,9 @@ import com.mhlko.talk.ui.theme.*
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
 import io.livekit.android.room.track.VideoQuality
+import io.getstream.video.android.core.Call as StreamCall
+import io.getstream.video.android.compose.theme.VideoTheme
+import io.getstream.video.android.compose.ui.components.call.activecall.CallContent
 import io.livekit.android.renderer.SurfaceViewRenderer
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.launch
@@ -204,6 +217,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     fun withCallPermission(action: () -> Unit) {
         val missing = buildList {
             add(Manifest.permission.RECORD_AUDIO)
+            add(Manifest.permission.CAMERA)
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
         }.filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isEmpty()) action() else {
@@ -260,7 +274,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     Scaffold(
         containerColor = MHTalkBackground,
         bottomBar = {
-            if (state.roomName != null) NavigationBar(containerColor = Color(0xFF101422)) {
+            if (state.roomName != null && state.rtcProvider !in setOf("daily", "whereby", "stream")) NavigationBar(containerColor = Color(0xFF101422)) {
                 NavigationBarItem(tab == 0, { tab = 0 }, { Icon(Icons.Rounded.Tag, "Room") }, label = { Text("Room") })
                 NavigationBarItem(tab == 1, { tab = 1 }, { Icon(Icons.Rounded.ChatBubble, "Chat") }, label = { Text("Chat") })
             }
@@ -284,6 +298,14 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                     state,
                     onMain = { withCallPermission(session::joinMain) },
                     onPrivate = { privateSheet = true },
+                )
+                state.rtcProvider in setOf("daily", "whereby") -> EmbeddedPrebuiltRoom(
+                    url = state.embeddedCallUrl,
+                    onLeave = session::leave,
+                )
+                state.rtcProvider == "stream" -> StreamNativeRoom(
+                    call = session.activeStreamCall(),
+                    onLeave = session::leave,
                 )
                 tab == 0 -> ActiveRoom(
                     state,
@@ -488,7 +510,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                 LazyColumn(Modifier.heightIn(max = 470.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     item { Text("Please accept these rules before using rooms and chat.", fontWeight = FontWeight.Bold) }
                     item { Text("Be respectful. Harassment, threats, sexual exploitation, illegal content, malware, privacy violations and copyright infringement are prohibited.", color = MHTalkMuted) }
-                    item { Text("MHTalk may process voice, video, screen share, profile details, messages and files only to provide realtime communication. LiveKit carries realtime media and the MHTalk service issues secure room access.", color = MHTalkMuted) }
+                    item { Text("MHTalk may process voice, video, screen share, profile details, messages and files only to provide realtime communication. The selected compatible provider carries realtime media and the MHTalk service issues secure room access.", color = MHTalkMuted) }
                     item { Text("Public Main messages are filtered. You can long-press messages and open member profiles to report or block users. Reports are retained for up to 30 days for safety review.", color = MHTalkMuted) }
                     item { Text("By continuing, you agree to these Terms of Use and the Privacy Policy shown in Help.", color = MHTalkMuted) }
                 }
@@ -676,6 +698,94 @@ private fun Header(
 }
 
 @Composable
+private fun StreamNativeRoom(call: StreamCall?, onLeave: () -> Unit) {
+    if (call == null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(color = MHTalkPurple)
+        }
+        return
+    }
+    VideoTheme {
+        CallContent(
+            modifier = Modifier.fillMaxSize(),
+            call = call,
+            onBackPressed = onLeave,
+        )
+    }
+}
+
+@Composable
+private fun EmbeddedPrebuiltRoom(url: String?, onLeave: () -> Unit) {
+    val context = LocalContext.current
+    if (url.isNullOrBlank()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(color = MHTalkPurple)
+        }
+        return
+    }
+    val webView = remember(context) {
+        WebView(context).apply {
+            setBackgroundColor(android.graphics.Color.rgb(13, 16, 28))
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.mediaPlaybackRequiresUserGesture = false
+            settings.allowFileAccess = false
+            settings.allowContentAccess = false
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            webChromeClient = object : WebChromeClient() {
+                override fun onPermissionRequest(request: PermissionRequest) {
+                    post {
+                        val allowed = request.resources.filter { resource ->
+                            when (resource) {
+                                PermissionRequest.RESOURCE_AUDIO_CAPTURE ->
+                                    ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                                PermissionRequest.RESOURCE_VIDEO_CAPTURE ->
+                                    ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                                else -> false
+                            }
+                        }
+                        if (allowed.isEmpty()) request.deny() else request.grant(allowed.toTypedArray())
+                    }
+                }
+            }
+            webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                    val host = request.url.host.orEmpty().lowercase()
+                    if (
+                        host == "daily.co" || host.endsWith(".daily.co") || host.endsWith(".dailywebrtc.com") ||
+                        host == "whereby.com" || host.endsWith(".whereby.com")
+                    ) return false
+                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, request.url)) }
+                    return true
+                }
+            }
+        }
+    }
+    DisposableEffect(webView) {
+        onDispose {
+            webView.stopLoading()
+            webView.loadUrl("about:blank")
+            webView.removeAllViews()
+            webView.destroy()
+        }
+    }
+    Box(Modifier.fillMaxSize().background(MHTalkBackground)) {
+        AndroidView(
+            factory = { webView },
+            update = { view -> if (view.url != url) view.loadUrl(url) },
+            modifier = Modifier.fillMaxSize(),
+        )
+        FilledTonalIconButton(
+            onClick = onLeave,
+            modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+        ) {
+            Icon(Icons.Rounded.CallEnd, contentDescription = "Leave room")
+        }
+    }
+}
+
+@Composable
 private fun RoomsHome(state: SessionUiState, onMain: () -> Unit, onPrivate: () -> Unit) {
     Column(
         Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF171A38), MHTalkBackground))).padding(18.dp),
@@ -758,7 +868,15 @@ private fun ActiveRoom(
                         Text(if ("me-camera" in expandedMedia) "Hide my camera" else "Show my camera")
                     }
                     if ("me-camera" in expandedMedia) {
-                        session.videoTrack(null, Track.Source.CAMERA)?.let { VideoTile(it, session, "Your camera") }
+                        if (state.rtcProvider == "cloudflare-realtime") {
+                            CloudflareVideoTile(session, null, CloudflareRtcSession.TrackSource.Camera, "Your camera")
+                        } else if (state.rtcProvider == "tencent") {
+                            TencentVideoTile(session, null, TencentRtcSession.TrackSource.Camera, "Your camera")
+                        } else if (state.rtcProvider == "agora") {
+                            AgoraVideoTile(session, null, AgoraRtcSession.TrackSource.Camera, "Your camera")
+                        } else {
+                            session.videoTrack(null, Track.Source.CAMERA)?.let { VideoTile(it, session, "Your camera") }
+                        }
                     }
                 }
                 if (state.screenShareEnabled) {
@@ -772,8 +890,16 @@ private fun ActiveRoom(
                         Text(if ("me-screen" in expandedMedia) "Hide my stream" else "Show my stream")
                     }
                     if ("me-screen" in expandedMedia) {
-                        session.videoTrack(null, Track.Source.SCREEN_SHARE)?.let {
-                            VideoTile(it, session, "Your screen", isScreenShare = true)
+                        if (state.rtcProvider == "cloudflare-realtime") {
+                            CloudflareVideoTile(session, null, CloudflareRtcSession.TrackSource.Screen, "Your screen")
+                        } else if (state.rtcProvider == "tencent") {
+                            TencentVideoTile(session, null, TencentRtcSession.TrackSource.Screen, "Your screen")
+                        } else if (state.rtcProvider == "agora") {
+                            AgoraVideoTile(session, null, AgoraRtcSession.TrackSource.Screen, "Your screen")
+                        } else {
+                            session.videoTrack(null, Track.Source.SCREEN_SHARE)?.let {
+                                VideoTile(it, session, "Your screen", isScreenShare = true)
+                            }
                         }
                     }
                 }
@@ -794,9 +920,20 @@ private fun ActiveRoom(
                         modifier = Modifier.fillMaxWidth(),
                     ) { Icon(if (member.identity in expandedMedia) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown, "Show media", tint = MHTalkGreen) }
                     if (member.identity in expandedMedia) {
-                        if (member.cameraEnabled) session.videoTrack(member.identity, Track.Source.CAMERA)?.let { VideoTile(it, session, "${member.name}'s camera") }
-                        if (member.screenShareEnabled) session.videoTrack(member.identity, Track.Source.SCREEN_SHARE)?.let {
-                            VideoTile(it, session, "${member.name}'s screen", isScreenShare = true, member = member)
+                        if (state.rtcProvider == "cloudflare-realtime") {
+                            if (member.cameraEnabled) CloudflareVideoTile(session, member.identity, CloudflareRtcSession.TrackSource.Camera, "${member.name}'s camera")
+                            if (member.screenShareEnabled) CloudflareVideoTile(session, member.identity, CloudflareRtcSession.TrackSource.Screen, "${member.name}'s screen")
+                        } else if (state.rtcProvider == "tencent") {
+                            if (member.cameraEnabled) TencentVideoTile(session, member.identity, TencentRtcSession.TrackSource.Camera, "${member.name}'s camera")
+                            if (member.screenShareEnabled) TencentVideoTile(session, member.identity, TencentRtcSession.TrackSource.Screen, "${member.name}'s screen")
+                        } else if (state.rtcProvider == "agora") {
+                            if (member.cameraEnabled) AgoraVideoTile(session, member.identity, AgoraRtcSession.TrackSource.Camera, "${member.name}'s camera")
+                            if (member.screenShareEnabled) AgoraVideoTile(session, member.identity, AgoraRtcSession.TrackSource.Screen, "${member.name}'s screen")
+                        } else {
+                            if (member.cameraEnabled) session.videoTrack(member.identity, Track.Source.CAMERA)?.let { VideoTile(it, session, "${member.name}'s camera") }
+                            if (member.screenShareEnabled) session.videoTrack(member.identity, Track.Source.SCREEN_SHARE)?.let {
+                                VideoTile(it, session, "${member.name}'s screen", isScreenShare = true, member = member)
+                            }
                         }
                     }
                 }
@@ -937,6 +1074,120 @@ private fun ShareOptionsDialog(
         confirmButton = { TextButton({ onStart(ShareOptions(includeMic, quality)) }) { Text("Continue") } },
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun CloudflareVideoTile(
+    session: SessionViewModel,
+    identity: String?,
+    source: CloudflareRtcSession.TrackSource,
+    label: String,
+) {
+    var track by remember(identity, source) { mutableStateOf(session.cloudflareVideoTrack(identity, source)) }
+    LaunchedEffect(identity, source) {
+        repeat(80) {
+            track = session.cloudflareVideoTrack(identity, source)
+            if (track != null) return@LaunchedEffect
+            delay(100)
+        }
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+        color = Color.Black,
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Box {
+            track?.let { activeTrack ->
+                AndroidView(
+                    factory = { context ->
+                        org.webrtc.SurfaceViewRenderer(context).also { renderer ->
+                            session.initializeCloudflareRenderer(renderer)
+                            renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+                            renderer.setMirror(identity == null && source == CloudflareRtcSession.TrackSource.Camera)
+                            activeTrack.addSink(renderer)
+                        }
+                    },
+                    onRelease = { renderer ->
+                        activeTrack.removeSink(renderer)
+                        renderer.release()
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            Text(
+                label,
+                modifier = Modifier.align(Alignment.BottomStart)
+                    .background(Color(0x99000000))
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                color = Color.White,
+                fontSize = 12.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AgoraVideoTile(
+    session: SessionViewModel,
+    identity: String?,
+    source: AgoraRtcSession.TrackSource,
+    label: String,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+        color = Color.Black,
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Box {
+            AndroidView(
+                factory = { context ->
+                    session.agoraVideoView(context, identity, source)
+                        ?: android.widget.FrameLayout(context)
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+            Text(
+                label,
+                modifier = Modifier.align(Alignment.BottomStart)
+                    .background(Color(0x99000000))
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                color = Color.White,
+                fontSize = 12.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TencentVideoTile(
+    session: SessionViewModel,
+    identity: String?,
+    source: TencentRtcSession.TrackSource,
+    label: String,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+        color = Color.Black,
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Box {
+            AndroidView(
+                factory = { context ->
+                    session.tencentVideoView(context, identity, source)
+                        ?: android.widget.FrameLayout(context)
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+            Text(
+                label,
+                modifier = Modifier.align(Alignment.BottomStart)
+                    .background(Color(0x99000000))
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                color = Color.White,
+                fontSize = 12.sp,
+            )
+        }
+    }
 }
 
 @Composable
@@ -1730,8 +1981,8 @@ private fun SupportDialog(
         },
         text = {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                item { Text("MHTalk Beta currently uses LiveKit for calls. Its free monthly capacity can pause new connections until the quota resets.", color = MHTalkMuted) }
-                item { Text("The safe multi-provider broker is ready, but another call provider will not be activated until its credentials and tested Windows/Android adapters are installed. We never pretend an unavailable provider is usable.", color = MHTalkMuted) }
+                item { Text("MHTalk Beta selects among compatible free realtime providers. A provider is used only when its server route and this app version are ready.", color = MHTalkMuted) }
+                item { Text("The server selects a provider before the room opens and retries the next compatible provider if room creation fails. Active rooms are never moved between incompatible providers.", color = MHTalkMuted) }
                 item {
                     Surface(color = Color(0xFF222944), shape = RoundedCornerShape(12.dp)) {
                         Column(Modifier.padding(14.dp)) {
@@ -1786,7 +2037,7 @@ private fun HelpDialog(onDismiss: () -> Unit) {
                 }
                 item {
                     Text("Privacy", fontWeight = FontWeight.Bold)
-                    Text("Voice and video travel through LiveKit for realtime delivery. Files are transferred to connected room participants. MHTalk does not require your LiveKit secret on the phone.", color = MHTalkMuted)
+                    Text("Voice, video, room chat and live attachments travel through the selected compatible provider. Provider secrets stay on the MHTalk server and are never stored on the phone.", color = MHTalkMuted)
                     TextButton(
                         onClick = {
                             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/mhlko-tech/MhlkoTalk/blob/main/MHTalk%20Android/PRIVACY_POLICY.md")))

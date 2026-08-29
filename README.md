@@ -7,6 +7,9 @@ The app is visibly marked **Beta** while MHTalk uses zero-budget service
 allocations. It reports its supported realtime adapters to the routing broker
 and applies hard deadlines to token acquisition and room connection, preventing
 an unavailable provider from leaving the UI in an infinite loading state.
+Stream, Agora, Tencent, Whereby Embedded, Daily Prebuilt and native LiveKit are
+the currently shipped Android adapters; the server selects one compatible
+provider before the room opens.
 
 The Android client uses the same production Supabase account system as the
 desktop client. It supports username/email password sign-in, registration, mandatory

@@ -19,6 +19,7 @@ import android.content.ContentValues
 import android.os.Environment
 import android.util.Base64
 import android.os.Build
+import android.view.SurfaceView
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
@@ -33,6 +34,7 @@ import com.mhlko.talk.data.calculateAvatarCrop
 import com.mhlko.talk.data.ConnectionStatus
 import com.mhlko.talk.data.MHTalkApi
 import com.mhlko.talk.data.MemberUi
+import com.mhlko.talk.data.RoomCredentials
 import com.mhlko.talk.data.SessionUiState
 import com.mhlko.talk.data.UserProfile
 import com.mhlko.talk.data.normalizeRoomAvatar
@@ -61,6 +63,11 @@ import io.livekit.android.room.track.RemoteTrackPublication
 import io.livekit.android.room.track.VideoQuality
 import io.livekit.android.room.track.screencapture.ScreenCaptureParams
 import io.livekit.android.renderer.SurfaceViewRenderer
+import io.getstream.video.android.core.Call as StreamCall
+import io.getstream.video.android.core.GEO
+import io.getstream.video.android.core.StreamVideo
+import io.getstream.video.android.core.StreamVideoBuilder
+import io.getstream.video.android.model.User as StreamUser
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -92,7 +99,52 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             ),
         ),
     )
+    private var streamClient: StreamVideo? = null
+    private var streamCall: StreamCall? = null
+    private val agoraRtc = AgoraRtcSession(
+        context = application,
+        onMembers = ::syncAgoraParticipants,
+        onPayload = ::handleProviderPayload,
+        onConnectionState = ::handleAgoraConnectionState,
+        onTokenRefreshNeeded = { refreshAgoraCredentials() },
+    )
+    private val tencentRtc = TencentRtcSession(
+        context = application,
+        onMembers = ::syncTencentParticipants,
+        onPayload = ::handleProviderPayload,
+        onConnectionState = ::handleTencentConnectionState,
+        onNetworkQuality = { _ -> Unit },
+        onScreenShareStopped = {
+            _state.update { it.copy(screenShareEnabled = false) }
+            startCallService(_state.value.cameraEnabled, screenShare = false)
+        },
+    )
+    private val cloudflareRtc = CloudflareRtcSession(
+        context = application,
+        accessToken = auth::accessToken,
+        onMembers = ::syncCloudflareParticipants,
+        onPayload = ::handleProviderPayload,
+        onConnectionState = ::handleCloudflareConnectionState,
+        onScreenShareStopped = {
+            _state.update { it.copy(screenShareEnabled = false) }
+            startCallService(_state.value.cameraEnabled, screenShare = false)
+        },
+    )
+    private val rtcAdapters = RtcAdapterRegistry(
+        listOf(
+            RtcProviderAdapter("stream", ::connectStream),
+            RtcProviderAdapter("agora", ::connectAgora),
+            RtcProviderAdapter("tencent", ::connectTencent),
+            RtcProviderAdapter("cloudflare-realtime", ::connectCloudflare),
+            RtcProviderAdapter("whereby", ::connectWhereby),
+            RtcProviderAdapter("daily", ::connectDaily),
+            RtcProviderAdapter("livekit", ::connectLiveKit),
+        ),
+    )
     private val profiles = mutableMapOf<String, UserProfile>()
+    private var agoraMembers = emptyList<AgoraMember>()
+    private var tencentMembers = emptyList<TencentMember>()
+    private var cloudflareMembers = emptyList<CloudflareMember>()
     private val userVolumes = mutableMapOf<String, Int>()
     private val streamVolumes = mutableMapOf<String, Int>()
     private val remoteTyping = mutableMapOf<String, String>()
@@ -186,10 +238,15 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             wantedInviteCode = inviteCode
             _state.update { it.copy(status = ConnectionStatus.Connecting, error = null, connectionMessage = "Selecting the best available server…") }
             runCatching {
-                if (_state.value.roomName != null) room.disconnect()
-                val credentials = withTimeout(12_000) { api.credentials(roomName, inviteCode) }
-                require(credentials.provider == "livekit") {
-                    "The selected call provider is not supported by this app version"
+                if (_state.value.roomName != null) {
+                    room.disconnect()
+                    disconnectStream()
+                    agoraRtc.disconnect()
+                    tencentRtc.disconnect()
+                    cloudflareRtc.disconnect()
+                }
+                val credentials = withTimeout(12_000) {
+                    api.credentials(roomName, inviteCode, rtcAdapters.supportedProviders)
                 }
                 _state.update {
                     it.copy(
@@ -200,25 +257,29 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         connectionMessage = "Connecting through ${credentials.provider}…",
                     )
                 }
-                configureCameraQuality(credentials.subscriptionTier)
-                withTimeout(18_000) { room.connect(credentials.serverUrl, credentials.token) }
-                startCallService(camera = false, screenShare = false)
-                room.localParticipant.setMicrophoneEnabled(_state.value.microphoneEnabled)
-                sendProfile()
-                credentials.roomName
-            }.onSuccess { actualRoom ->
+                when (val connection = rtcAdapters.connect(credentials)) {
+                    is RtcConnectionResult.Embedded -> Pair(connection.roomName, connection.url)
+                    is RtcConnectionResult.Native -> Pair(connection.roomName, null)
+                }
+            }.onSuccess { (actualRoom, embeddedCallUrl) ->
                 _state.update {
                     it.copy(
                         status = ConnectionStatus.Connected,
                         roomName = actualRoom,
+                        embeddedCallUrl = embeddedCallUrl,
                         error = null,
                         connectionMessage = null,
                         messages = emptyList(),
                     )
                 }
-                syncParticipants()
-                disableAutoSubscribeForRemoteMedia()
-                requestProfiles()
+                if (_state.value.rtcProvider == "livekit") {
+                    syncParticipants()
+                    disableAutoSubscribeForRemoteMedia()
+                    requestProfiles()
+                } else if (_state.value.rtcProvider in setOf("agora", "tencent", "cloudflare-realtime")) {
+                    sendProfile()
+                    requestProfiles()
+                }
             }.onFailure(::showFailure)
         }
     }
@@ -229,6 +290,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         wantedRoom = null
         wantedInviteCode = null
         room.disconnect()
+        disconnectStream()
+        agoraRtc.disconnect()
+        tencentRtc.disconnect()
+        cloudflareRtc.disconnect()
         getApplication<Application>().stopService(Intent(getApplication(), CallService::class.java))
         _state.value = SessionUiState(
             termsAccepted = preferences.getBoolean("legal.termsAccepted", false),
@@ -263,7 +328,129 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private suspend fun connectDaily(credentials: RoomCredentials): RtcConnectionResult {
+        val callUrl = Uri.parse(credentials.serverUrl).buildUpon()
+            .appendQueryParameter("t", credentials.token)
+            .appendQueryParameter("userName", profile.name)
+            .appendQueryParameter("mhtalk", "1")
+            .build()
+            .toString()
+        return RtcConnectionResult.Embedded(credentials.roomName, callUrl)
+    }
+
+    private suspend fun connectWhereby(credentials: RoomCredentials): RtcConnectionResult {
+        val callUrl = Uri.parse(credentials.serverUrl).buildUpon()
+            .appendQueryParameter("displayName", profile.name)
+            .appendQueryParameter("skipMediaPermissionPrompt", "on")
+            .appendQueryParameter("precallCeremony", "off")
+            .appendQueryParameter("video", "off")
+            .build()
+            .toString()
+        return RtcConnectionResult.Embedded(credentials.roomName, callUrl)
+    }
+
+    /** Native Stream adapter. The API secret never reaches the device; the worker issues short-lived user tokens. */
+    private suspend fun connectStream(credentials: RoomCredentials): RtcConnectionResult {
+        val clientKey = credentials.clientKey?.takeIf { it.isNotBlank() }
+            ?: error("Stream client key is missing")
+        val identity = streamUserId(credentials.token)
+        val localProfile = profile
+        val user = StreamUser(
+            id = identity,
+            name = localProfile.name,
+            image = localProfile.avatar.takeIf { it.startsWith("https://", ignoreCase = true) }.orEmpty(),
+        )
+        val client = StreamVideoBuilder(
+            context = getApplication<Application>(),
+            apiKey = clientKey,
+            geo = GEO.GlobalEdgeNetwork,
+            user = user,
+            token = credentials.token,
+            legacyTokenProvider = { _ ->
+                val refreshed = api.credentials(
+                    credentials.roomName,
+                    wantedInviteCode,
+                    listOf("stream"),
+                )
+                require(refreshed.provider == "stream") {
+                    "The selected call provider changed while refreshing the Stream session"
+                }
+                refreshed.token
+            },
+        ).build()
+        val call = client.call(type = "default", id = credentials.roomName)
+        streamClient = client
+        streamCall = call
+        call.camera.setEnabled(false)
+        call.microphone.setEnabled(_state.value.microphoneEnabled)
+        try {
+            withTimeout(18_000) { call.join(create = true).getOrThrow() }
+        } catch (error: Throwable) {
+            disconnectStream()
+            throw error
+        }
+        startCallService(camera = false, screenShare = false)
+        return RtcConnectionResult.Native(credentials.roomName)
+    }
+
+    private fun disconnectStream() {
+        streamCall?.leave()
+        streamCall = null
+        streamClient?.cleanup()
+        streamClient = null
+    }
+
+    fun activeStreamCall(): StreamCall? = streamCall
+
+    private suspend fun connectLiveKit(credentials: RoomCredentials): RtcConnectionResult {
+        configureCameraQuality(credentials.subscriptionTier)
+        withTimeout(18_000) { room.connect(credentials.serverUrl, credentials.token) }
+        startCallService(camera = false, screenShare = false)
+        room.localParticipant.setMicrophoneEnabled(_state.value.microphoneEnabled)
+        sendProfile()
+        return RtcConnectionResult.Native(credentials.roomName)
+    }
+
+    private suspend fun connectAgora(credentials: RoomCredentials): RtcConnectionResult {
+        agoraRtc.connect(credentials, _state.value.microphoneEnabled)
+        startCallService(camera = false, screenShare = false)
+        return RtcConnectionResult.Native(credentials.roomName)
+    }
+
+    private suspend fun connectTencent(credentials: RoomCredentials): RtcConnectionResult {
+        tencentRtc.connect(credentials, _state.value.microphoneEnabled)
+        startCallService(camera = false, screenShare = false)
+        return RtcConnectionResult.Native(credentials.roomName)
+    }
+
+    private suspend fun connectCloudflare(credentials: RoomCredentials): RtcConnectionResult {
+        cloudflareRtc.connect(credentials, _state.value.microphoneEnabled)
+        startCallService(camera = false, screenShare = false)
+        return RtcConnectionResult.Native(credentials.roomName)
+    }
+
     private suspend fun setMicrophoneState(enabled: Boolean) {
+        if (_state.value.rtcProvider == "cloudflare-realtime") {
+            cloudflareRtc.setMicrophoneEnabled(enabled)
+            _state.update { it.copy(microphoneEnabled = enabled) }
+            return
+        }
+        if (_state.value.rtcProvider == "tencent") {
+            tencentRtc.setMicrophoneEnabled(enabled)
+            _state.update { it.copy(microphoneEnabled = enabled) }
+            return
+        }
+        if (_state.value.rtcProvider == "agora") {
+            agoraRtc.setMicrophoneEnabled(enabled)
+            _state.update { it.copy(microphoneEnabled = enabled) }
+            return
+        }
+        if (_state.value.rtcProvider == "stream") {
+            streamCall?.microphone?.setEnabled(enabled)
+                ?: error("Stream call is not connected")
+            _state.update { it.copy(microphoneEnabled = enabled) }
+            return
+        }
         val publication = room.localParticipant.getTrackPublication(Track.Source.MICROPHONE)
         if (screenAudioTrack != null && publication is LocalTrackPublication) {
             publication.muted = !enabled
@@ -276,7 +463,20 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     fun toggleCamera() {
         viewModelScope.launch {
             val enabled = !_state.value.cameraEnabled
-            runCatching { room.localParticipant.setCameraEnabled(enabled) }
+            runCatching {
+                if (_state.value.rtcProvider == "cloudflare-realtime") {
+                    cloudflareRtc.setCameraEnabled(enabled)
+                } else if (_state.value.rtcProvider == "tencent") {
+                    tencentRtc.setCameraEnabled(enabled)
+                } else if (_state.value.rtcProvider == "agora") {
+                    agoraRtc.setCameraEnabled(enabled)
+                } else if (_state.value.rtcProvider == "stream") {
+                    streamCall?.camera?.setEnabled(enabled)
+                        ?: error("Stream call is not connected")
+                } else {
+                    room.localParticipant.setCameraEnabled(enabled)
+                }
+            }
                 .onSuccess {
                     _state.update { it.copy(cameraEnabled = enabled) }
                     startCallService(enabled, _state.value.screenShareEnabled)
@@ -294,19 +494,32 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             configureShareQuality(allowedQuality)
             startCallService(_state.value.cameraEnabled, screenShare = true)
             runCatching {
-                room.localParticipant.setScreenShareEnabled(
-                    true,
-                    ScreenCaptureParams(permissionData) {
-                        stopScreenAudio()
-                        _state.update { it.copy(screenShareEnabled = false) }
-                        startCallService(_state.value.cameraEnabled, screenShare = false)
-                    },
-                )
+                if (_state.value.rtcProvider == "cloudflare-realtime") {
+                    cloudflareRtc.startScreenShare(permissionData, allowedQuality)
+                } else if (_state.value.rtcProvider == "tencent") {
+                    tencentRtc.startScreenShare(permissionData, allowedQuality)
+                } else if (_state.value.rtcProvider == "agora") {
+                    agoraRtc.startScreenShare(permissionData, allowedQuality)
+                } else if (_state.value.rtcProvider == "stream") {
+                    streamCall?.startScreenSharing(permissionData)
+                        ?: error("Stream call is not connected")
+                } else {
+                    room.localParticipant.setScreenShareEnabled(
+                        true,
+                        ScreenCaptureParams(permissionData) {
+                            stopScreenAudio()
+                            _state.update { it.copy(screenShareEnabled = false) }
+                            startCallService(_state.value.cameraEnabled, screenShare = false)
+                        },
+                    )
+                }
             }.onSuccess {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startScreenAudio()
+                if (_state.value.rtcProvider == "livekit" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startScreenAudio()
+                }
                 setMicrophoneState(includeMicrophone)
                 _state.update { it.copy(screenShareEnabled = true, microphoneEnabled = includeMicrophone) }
-                syncParticipants()
+                if (_state.value.rtcProvider == "livekit") syncParticipants()
             }.onFailure {
                 startCallService(_state.value.cameraEnabled, screenShare = false)
                 showFailure(it)
@@ -317,13 +530,24 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     fun stopScreenShare() {
         viewModelScope.launch {
             runCatching {
-                stopScreenAudio()
-                room.localParticipant.setScreenShareEnabled(false)
+                if (_state.value.rtcProvider == "cloudflare-realtime") {
+                    cloudflareRtc.stopScreenShare()
+                } else if (_state.value.rtcProvider == "tencent") {
+                    tencentRtc.stopScreenShare()
+                } else if (_state.value.rtcProvider == "agora") {
+                    agoraRtc.stopScreenShare()
+                } else if (_state.value.rtcProvider == "stream") {
+                    streamCall?.stopScreenSharing()
+                        ?: error("Stream call is not connected")
+                } else {
+                    stopScreenAudio()
+                    room.localParticipant.setScreenShareEnabled(false)
+                }
             }
                 .onSuccess {
                     _state.update { it.copy(screenShareEnabled = false) }
                     startCallService(_state.value.cameraEnabled, screenShare = false)
-                    syncParticipants()
+                    if (_state.value.rtcProvider == "livekit") syncParticipants()
                 }
                 .onFailure(::showFailure)
         }
@@ -342,8 +566,47 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         return participant.getTrackPublication(source)?.track as? VideoTrack
     }
 
+    internal fun agoraVideoView(
+        context: Context,
+        identity: String?,
+        source: AgoraRtcSession.TrackSource,
+    ): SurfaceView? = agoraRtc.createVideoView(context, identity, source)
+
+    internal fun tencentVideoView(
+        context: Context,
+        identity: String?,
+        source: TencentRtcSession.TrackSource,
+    ): android.view.View? = tencentRtc.createVideoView(context, identity, source)
+
+    internal fun cloudflareVideoTrack(
+        identity: String?,
+        source: CloudflareRtcSession.TrackSource,
+    ): org.webrtc.VideoTrack? = cloudflareRtc.videoTrack(identity, source)
+
+    internal fun initializeCloudflareRenderer(renderer: org.webrtc.SurfaceViewRenderer) {
+        cloudflareRtc.initializeRenderer(renderer)
+    }
+
     /** Opt-in media: remote camera/screen video and screen audio remain off until the user chooses to watch. */
     fun watchMemberMedia(identity: String) {
+        if (_state.value.rtcProvider == "cloudflare-realtime") {
+            val member = _state.value.members.firstOrNull { it.identity == identity } ?: return
+            if (member.cameraEnabled) cloudflareRtc.watch(identity, CloudflareRtcSession.TrackSource.Camera)
+            if (member.screenShareEnabled) cloudflareRtc.watch(identity, CloudflareRtcSession.TrackSource.Screen)
+            return
+        }
+        if (_state.value.rtcProvider == "tencent") {
+            val member = _state.value.members.firstOrNull { it.identity == identity } ?: return
+            if (member.cameraEnabled) tencentRtc.watch(identity, TencentRtcSession.TrackSource.Camera)
+            if (member.screenShareEnabled) tencentRtc.watch(identity, TencentRtcSession.TrackSource.Screen)
+            return
+        }
+        if (_state.value.rtcProvider == "agora") {
+            val member = _state.value.members.firstOrNull { it.identity == identity } ?: return
+            if (member.cameraEnabled) agoraRtc.watch(identity, AgoraRtcSession.TrackSource.Camera)
+            if (member.screenShareEnabled) agoraRtc.watch(identity, AgoraRtcSession.TrackSource.Screen)
+            return
+        }
         val participant = room.remoteParticipants.values.firstOrNull { it.identity?.value == identity } ?: return
         listOf(Track.Source.CAMERA, Track.Source.SCREEN_SHARE, Track.Source.SCREEN_SHARE_AUDIO).forEach { source ->
             (participant.getTrackPublication(source) as? RemoteTrackPublication)?.setSubscribed(true)
@@ -351,6 +614,21 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun stopWatchingMemberMedia(identity: String) {
+        if (_state.value.rtcProvider == "cloudflare-realtime") {
+            cloudflareRtc.unwatch(identity, CloudflareRtcSession.TrackSource.Camera)
+            cloudflareRtc.unwatch(identity, CloudflareRtcSession.TrackSource.Screen)
+            return
+        }
+        if (_state.value.rtcProvider == "tencent") {
+            tencentRtc.unwatch(identity, TencentRtcSession.TrackSource.Camera)
+            tencentRtc.unwatch(identity, TencentRtcSession.TrackSource.Screen)
+            return
+        }
+        if (_state.value.rtcProvider == "agora") {
+            agoraRtc.unwatch(identity, AgoraRtcSession.TrackSource.Camera)
+            agoraRtc.unwatch(identity, AgoraRtcSession.TrackSource.Screen)
+            return
+        }
         val participant = room.remoteParticipants.values.firstOrNull { it.identity?.value == identity } ?: return
         listOf(Track.Source.CAMERA, Track.Source.SCREEN_SHARE, Track.Source.SCREEN_SHARE_AUDIO).forEach { source ->
             (participant.getTrackPublication(source) as? RemoteTrackPublication)?.setSubscribed(false)
@@ -358,6 +636,22 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setMemberVideoQuality(identity: String, source: Track.Source, quality: VideoQuality) {
+        if (_state.value.rtcProvider == "tencent") {
+            tencentRtc.watch(
+                identity,
+                if (source == Track.Source.SCREEN_SHARE) {
+                    TencentRtcSession.TrackSource.Screen
+                } else {
+                    TencentRtcSession.TrackSource.Camera
+                },
+                when (quality) {
+                    VideoQuality.LOW -> ShareQuality.Low
+                    VideoQuality.HIGH -> ShareQuality.High
+                    else -> ShareQuality.Medium
+                },
+            )
+            return
+        }
         val participant = room.remoteParticipants.values.firstOrNull { it.identity?.value == identity } ?: return
         (participant.getTrackPublication(source) as? RemoteTrackPublication)?.setVideoQuality(quality)
     }
@@ -396,6 +690,22 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     fun setParticipantVolume(identity: String, stream: Boolean, volume: Int) {
         val safeVolume = volume.coerceIn(0, 100)
         if (stream) streamVolumes[identity] = safeVolume else userVolumes[identity] = safeVolume
+        if (_state.value.rtcProvider == "cloudflare-realtime") {
+            cloudflareRtc.setParticipantVolume(identity, stream, safeVolume)
+            syncCloudflareParticipantsFromState()
+            return
+        }
+        if (_state.value.rtcProvider == "tencent") {
+            // TRTC exposes one mixed remote-audio volume per participant.
+            tencentRtc.setParticipantVolume(identity, userVolumes[identity] ?: 100)
+            syncTencentParticipantsFromState()
+            return
+        }
+        if (_state.value.rtcProvider == "agora") {
+            agoraRtc.setParticipantVolume(identity, stream, safeVolume)
+            syncAgoraParticipantsFromState()
+            return
+        }
         val participant = room.remoteParticipants.values.firstOrNull { it.identity?.value == identity }
         if (participant == null) {
             syncParticipants()
@@ -481,10 +791,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
             runCatching {
-                room.localParticipant.publishData(
-                    payload.toString().toByteArray(),
-                    topic = "mhtalk.chat",
-                ).getOrThrow()
+                sendRoomPayload(payload)
             }.onSuccess {
                 _state.update { it.copy(messages = it.messages + message) }
             }.onFailure(::showFailure)
@@ -508,7 +815,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     private suspend fun publishTyping(typing: Boolean) {
         val payload = JSONObject().put("type", "typing").put("typing", typing)
         runCatching {
-            room.localParticipant.publishData(payload.toString().toByteArray(), topic = "mhtalk.chat").getOrThrow()
+            sendRoomPayload(payload)
         }
     }
 
@@ -518,7 +825,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val filtered = if (_state.value.roomName == "Main") runCatching { api.moderate(text) }.getOrDefault(text) else text
             val payload = JSONObject().put("type", "edit").put("id", messageId).put("body", filtered)
-            room.localParticipant.publishData(payload.toString().toByteArray(), topic = "mhtalk.chat").getOrThrow()
+            sendRoomPayload(payload)
             _state.update { current ->
                 current.copy(messages = current.messages.map { if (it.id == messageId) it.copy(body = filtered) else it })
             }
@@ -529,7 +836,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         if (_state.value.status != ConnectionStatus.Connected) return
         viewModelScope.launch {
             val payload = JSONObject().put("type", "delete").put("id", messageId)
-            room.localParticipant.publishData(payload.toString().toByteArray(), topic = "mhtalk.chat").getOrThrow()
+            sendRoomPayload(payload)
             _state.update { current ->
                 current.copy(messages = current.messages.map { if (it.id == messageId) it.copy(body = "", attachment = null, deleted = true) else it })
             }
@@ -1045,6 +1352,18 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun switchCamera() {
+        if (_state.value.rtcProvider == "cloudflare-realtime") {
+            cloudflareRtc.switchCamera()
+            return
+        }
+        if (_state.value.rtcProvider == "tencent") {
+            tencentRtc.switchCamera()
+            return
+        }
+        if (_state.value.rtcProvider == "agora") {
+            agoraRtc.switchCamera()
+            return
+        }
         (room.localParticipant.getTrackPublication(Track.Source.CAMERA)?.track as? io.livekit.android.room.track.LocalVideoTrack)
             ?.switchCamera()
     }
@@ -1085,7 +1404,9 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         syncParticipants()
                     }
 
-                    is RoomEvent.Reconnecting -> _state.update { it.copy(status = ConnectionStatus.Recovering) }
+                    is RoomEvent.Reconnecting -> if (_state.value.rtcProvider == "livekit") {
+                        _state.update { it.copy(status = ConnectionStatus.Recovering) }
+                    }
                     is RoomEvent.ParticipantConnected -> {
                         playEventTone(4)
                         syncParticipants()
@@ -1102,7 +1423,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         syncParticipants()
                     }
                     is RoomEvent.Disconnected -> {
-                        if (!userLeft && wantedRoom != null) scheduleRecovery()
+                        if (!userLeft && wantedRoom != null && _state.value.rtcProvider == "livekit") scheduleRecovery()
                     }
                     is RoomEvent.DataReceived -> handleData(event)
                     is RoomEvent.FailedToConnect -> showFailure(event.error)
@@ -1118,7 +1439,13 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         runCatching {
             val payload = JSONObject(event.data.toString(Charsets.UTF_8))
             val identity = participant.identity?.value ?: return
-            if (identity in blockedIdentities) return
+            handleProviderPayload(identity, payload)
+        }
+    }
+
+    private fun handleProviderPayload(identity: String, payload: JSONObject) {
+        if (identity in blockedIdentities) return
+        runCatching {
             when (payload.optString("type")) {
                 "profile-request" -> viewModelScope.launch { sendProfile() }
                 "profile" -> {
@@ -1142,6 +1469,9 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         )
                     }
                     syncParticipants()
+                    if (_state.value.rtcProvider == "agora") syncAgoraParticipantsFromState()
+                    if (_state.value.rtcProvider == "tencent") syncTencentParticipantsFromState()
+                    if (_state.value.rtcProvider == "cloudflare-realtime") syncCloudflareParticipantsFromState()
                 }
                 "chat" -> {
                     val body = payload.optString("body")
@@ -1187,6 +1517,169 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     }
                     _state.update { it.copy(typingNames = remoteTyping.values.distinct()) }
                 }
+            }
+        }
+    }
+
+    private fun syncAgoraParticipants(participants: List<AgoraMember>) {
+        agoraMembers = participants
+        syncAgoraParticipantsFromState()
+    }
+
+    private fun syncAgoraParticipantsFromState() {
+        if (_state.value.rtcProvider != "agora") return
+        _state.update { current ->
+            current.copy(
+                members = agoraMembers
+                    .filterNot { it.identity in blockedIdentities }
+                    .map { member ->
+                        val remoteProfile = profiles[member.identity]
+                        MemberUi(
+                            identity = member.identity,
+                            name = remoteProfile?.name?.takeIf(String::isNotBlank) ?: member.identity.take(16),
+                            speaking = member.speaking,
+                            microphoneEnabled = member.microphoneEnabled,
+                            cameraEnabled = member.cameraEnabled,
+                            screenShareEnabled = member.screenShareEnabled,
+                            bio = remoteProfile?.bio.orEmpty(),
+                            avatar = normalizeRoomAvatar(remoteProfile?.avatar.orEmpty()),
+                            userVolume = userVolumes[member.identity] ?: 100,
+                            streamVolume = streamVolumes[member.identity] ?: 100,
+                        )
+                    },
+            )
+        }
+    }
+
+    private fun syncTencentParticipants(participants: List<TencentMember>) {
+        val previous = tencentMembers.associateBy(TencentMember::identity)
+        participants.forEach { member ->
+            previous[member.identity]?.let { old ->
+                if (!old.cameraEnabled && member.cameraEnabled) playEventTone(2)
+                if (!old.screenShareEnabled && member.screenShareEnabled) playEventTone(3)
+                if (old.screenShareEnabled && !member.screenShareEnabled) playEventTone(6)
+            }
+        }
+        val previousIds = previous.keys
+        val currentIds = participants.mapTo(mutableSetOf(), TencentMember::identity)
+        if ((currentIds - previousIds).isNotEmpty()) playEventTone(4)
+        if ((previousIds - currentIds).isNotEmpty()) playEventTone(5)
+        tencentMembers = participants
+        syncTencentParticipantsFromState()
+    }
+
+    private fun syncTencentParticipantsFromState() {
+        if (_state.value.rtcProvider != "tencent") return
+        _state.update { current ->
+            current.copy(
+                members = tencentMembers
+                    .filterNot { it.identity in blockedIdentities }
+                    .map { member ->
+                        val remoteProfile = profiles[member.identity]
+                        MemberUi(
+                            identity = member.identity,
+                            name = remoteProfile?.name?.takeIf(String::isNotBlank) ?: member.identity.take(16),
+                            speaking = member.speaking,
+                            microphoneEnabled = member.microphoneEnabled,
+                            cameraEnabled = member.cameraEnabled,
+                            screenShareEnabled = member.screenShareEnabled,
+                            bio = remoteProfile?.bio.orEmpty(),
+                            avatar = normalizeRoomAvatar(remoteProfile?.avatar.orEmpty()),
+                            userVolume = userVolumes[member.identity] ?: 100,
+                            streamVolume = streamVolumes[member.identity] ?: 100,
+                        )
+                    },
+            )
+        }
+    }
+
+    private fun syncCloudflareParticipants(participants: List<CloudflareMember>) {
+        val previous = cloudflareMembers.associateBy(CloudflareMember::identity)
+        participants.forEach { member ->
+            previous[member.identity]?.let { old ->
+                if (!old.cameraEnabled && member.cameraEnabled) playEventTone(2)
+                if (!old.screenShareEnabled && member.screenShareEnabled) playEventTone(3)
+                if (old.screenShareEnabled && !member.screenShareEnabled) playEventTone(6)
+            }
+        }
+        val previousIds = previous.keys
+        val currentIds = participants.mapTo(mutableSetOf(), CloudflareMember::identity)
+        if ((currentIds - previousIds).isNotEmpty()) playEventTone(4)
+        if ((previousIds - currentIds).isNotEmpty()) playEventTone(5)
+        cloudflareMembers = participants
+        syncCloudflareParticipantsFromState()
+    }
+
+    private fun syncCloudflareParticipantsFromState() {
+        if (_state.value.rtcProvider != "cloudflare-realtime") return
+        _state.update { current ->
+            current.copy(
+                members = cloudflareMembers
+                    .filterNot { it.identity in blockedIdentities }
+                    .map { member ->
+                        val remoteProfile = profiles[member.identity]
+                        MemberUi(
+                            identity = member.identity,
+                            name = remoteProfile?.name?.takeIf(String::isNotBlank) ?: member.identity.take(16),
+                            speaking = member.speaking,
+                            microphoneEnabled = member.microphoneEnabled,
+                            cameraEnabled = member.cameraEnabled,
+                            screenShareEnabled = member.screenShareEnabled,
+                            bio = remoteProfile?.bio.orEmpty(),
+                            avatar = normalizeRoomAvatar(remoteProfile?.avatar.orEmpty()),
+                            userVolume = userVolumes[member.identity] ?: 100,
+                            streamVolume = streamVolumes[member.identity] ?: 100,
+                        )
+                    },
+            )
+        }
+    }
+
+    private fun handleAgoraConnectionState(state: Int) {
+        when (state) {
+            io.agora.rtc2.Constants.CONNECTION_STATE_RECONNECTING ->
+                _state.update { it.copy(status = ConnectionStatus.Recovering) }
+            io.agora.rtc2.Constants.CONNECTION_STATE_CONNECTED ->
+                if (_state.value.status == ConnectionStatus.Recovering) {
+                    _state.update { it.copy(status = ConnectionStatus.Connected, error = null, connectionMessage = null) }
+                }
+            io.agora.rtc2.Constants.CONNECTION_STATE_FAILED ->
+                showFailure(IllegalStateException("Agora could not restore the call"))
+        }
+    }
+
+    private fun handleTencentConnectionState(state: TencentRtcSession.ConnectionState) {
+        when (state) {
+            TencentRtcSession.ConnectionState.Reconnecting ->
+                _state.update { it.copy(status = ConnectionStatus.Recovering) }
+            TencentRtcSession.ConnectionState.Connected ->
+                _state.update { it.copy(status = ConnectionStatus.Connected, error = null, connectionMessage = null) }
+            TencentRtcSession.ConnectionState.Failed ->
+                showFailure(IllegalStateException("Tencent could not restore the call"))
+        }
+    }
+
+    private fun handleCloudflareConnectionState(state: CloudflareRtcSession.ConnectionState) {
+        when (state) {
+            CloudflareRtcSession.ConnectionState.Connecting -> Unit
+            CloudflareRtcSession.ConnectionState.Reconnecting ->
+                _state.update { it.copy(status = ConnectionStatus.Recovering) }
+            CloudflareRtcSession.ConnectionState.Connected ->
+                if (_state.value.status == ConnectionStatus.Recovering) {
+                    _state.update { it.copy(status = ConnectionStatus.Connected, error = null, connectionMessage = null) }
+                }
+            CloudflareRtcSession.ConnectionState.Failed ->
+                showFailure(IllegalStateException("Cloudflare could not restore the call"))
+        }
+    }
+
+    private fun refreshAgoraCredentials() {
+        val roomName = wantedRoom ?: return
+        viewModelScope.launch {
+            runCatching {
+                api.credentials(roomName, wantedInviteCode, listOf("agora"))
+            }.onSuccess { credentials ->
+                if (credentials.provider == "agora") agoraRtc.renewCredentials(credentials)
             }
         }
     }
@@ -1252,19 +1745,24 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     private suspend fun sendProfile() {
         if (_state.value.status == ConnectionStatus.Idle) return
         val value = profile
-        val safeAvatar = normalizeRoomAvatar(value.avatar)
+        val normalizedAvatar = normalizeRoomAvatar(value.avatar)
+        val safeAvatar = if (
+            _state.value.rtcProvider in setOf("agora", "tencent", "cloudflare-realtime") && normalizedAvatar.length > 600
+        ) "" else normalizedAvatar
         val payload = JSONObject()
             .put("type", "profile")
             .put(
                 "profile",
                 JSONObject().put("name", value.name).put("bio", value.bio).put("avatar", safeAvatar),
             )
-        runCatching {
-            room.localParticipant.updateMetadata(
-                JSONObject().put("name", value.name).put("bio", value.bio).put("avatar", safeAvatar).toString(),
-            )
+        if (_state.value.rtcProvider == "livekit") {
+            runCatching {
+                room.localParticipant.updateMetadata(
+                    JSONObject().put("name", value.name).put("bio", value.bio).put("avatar", safeAvatar).toString(),
+                )
+            }
         }
-        room.localParticipant.publishData(payload.toString().toByteArray(), topic = "mhtalk.chat").getOrThrow()
+        sendRoomPayload(payload)
     }
 
     private fun Participant.participantMetadataProfile(identity: String): UserProfile? = runCatching {
@@ -1282,8 +1780,24 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         value.startsWith("https://", ignoreCase = true) || value.startsWith("data:image/", ignoreCase = true)
 
     private suspend fun requestProfiles() {
+        sendRoomPayload(JSONObject().put("type", "profile-request"))
+    }
+
+    private suspend fun sendRoomPayload(payload: JSONObject) {
+        if (_state.value.rtcProvider == "cloudflare-realtime") {
+            cloudflareRtc.send(payload)
+            return
+        }
+        if (_state.value.rtcProvider == "tencent") {
+            tencentRtc.send(payload)
+            return
+        }
+        if (_state.value.rtcProvider == "agora") {
+            agoraRtc.send(payload)
+            return
+        }
         room.localParticipant.publishData(
-            JSONObject().put("type", "profile-request").toString().toByteArray(),
+            payload.toString().toByteArray(),
             topic = "mhtalk.chat",
         ).getOrThrow()
     }
@@ -1331,7 +1845,9 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 delay(delayMs)
                 val name = wantedRoom ?: break
                 val result = runCatching {
-                    val credentials = withTimeout(12_000) { api.credentials(name, wantedInviteCode) }
+                    val credentials = withTimeout(12_000) {
+                        api.credentials(name, wantedInviteCode, listOf("livekit"))
+                    }
                     require(credentials.provider == "livekit") {
                         "The selected call provider is not supported by this app version"
                     }
@@ -1399,8 +1915,19 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     override fun onCleared() {
         runCatching { getApplication<Application>().unregisterReceiver(taskRemovedReceiver) }
         room.disconnect()
+        disconnectStream()
         super.onCleared()
     }
+}
+
+private fun streamUserId(token: String): String {
+    val encodedPayload = token.split('.').getOrNull(1)
+        ?: error("Stream token is malformed")
+    val payload = runCatching {
+        String(Base64.decode(encodedPayload, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING))
+    }.getOrElse { throw IllegalArgumentException("Stream token payload is invalid", it) }
+    return JSONObject(payload).optString("user_id").takeIf { it.isNotBlank() }
+        ?: error("Stream token does not contain a user identity")
 }
 
 private fun microphoneCaptureOptions(noiseCancellation: Boolean) = LocalAudioTrackOptions(

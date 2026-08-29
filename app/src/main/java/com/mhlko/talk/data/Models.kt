@@ -122,6 +122,7 @@ data class SessionUiState(
     val screenSharePrivacyEnabled: Boolean = true,
     val subscriptionTier: SubscriptionTier = SubscriptionTier.Free,
     val rtcProvider: String = "livekit",
+    val embeddedCallUrl: String? = null,
     val messagingProvider: String = "livekit-data",
     val fileProvider: String = "livekit-stream",
     val launchReady: Boolean = false,
