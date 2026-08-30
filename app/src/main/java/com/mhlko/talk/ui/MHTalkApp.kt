@@ -274,7 +274,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     Scaffold(
         containerColor = MHTalkBackground,
         bottomBar = {
-            if (state.roomName != null && state.rtcProvider !in setOf("daily", "whereby", "stream")) NavigationBar(containerColor = Color(0xFF101422)) {
+            if (state.roomName != null && state.rtcProvider !in setOf("daily", "whereby")) NavigationBar(containerColor = Color(0xFF101422)) {
                 NavigationBarItem(tab == 0, { tab = 0 }, { Icon(Icons.Rounded.Tag, "Room") }, label = { Text("Room") })
                 NavigationBarItem(tab == 1, { tab = 1 }, { Icon(Icons.Rounded.ChatBubble, "Chat") }, label = { Text("Chat") })
             }
@@ -303,7 +303,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                     url = state.embeddedCallUrl,
                     onLeave = session::leave,
                 )
-                state.rtcProvider == "stream" -> StreamNativeRoom(
+                state.rtcProvider == "stream" && tab == 0 -> StreamNativeRoom(
                     call = session.activeStreamCall(),
                     onLeave = session::leave,
                 )
@@ -415,6 +415,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     if (showHelp) HelpDialog(onDismiss = { showHelp = false })
     if (showSupport) SupportDialog(
         onDismiss = { showSupport = false },
+        allowExternalMemberships = !BuildConfig.PLAY_DISTRIBUTION,
         onOpenLava = {
             appScope.launch {
                 val accessToken = auth.accessToken()
@@ -1961,6 +1962,7 @@ private fun formatBytes(size: Long): String = when {
 @Composable
 private fun SupportDialog(
     onDismiss: () -> Unit,
+    allowExternalMemberships: Boolean,
     onOpenLava: () -> Unit,
     membershipMessage: String,
     onVerify: () -> Unit,
@@ -1991,15 +1993,19 @@ private fun SupportDialog(
                         }
                     }
                 }
-                item { Text("One active membership is planned to unlock premium features in both MHTalk and MVDownloader.", color = MHTalkMuted, fontSize = 12.sp) }
-                if (membershipMessage.isNotBlank()) item {
+                if (allowExternalMemberships) item { Text("One active membership is planned to unlock premium features in both MHTalk and MVDownloader.", color = MHTalkMuted, fontSize = 12.sp) }
+                if (allowExternalMemberships && membershipMessage.isNotBlank()) item {
                     Surface(color = Color(0xFF172C26), shape = RoundedCornerShape(10.dp)) {
                         Text(membershipMessage, color = MHTalkGreen, fontSize = 12.sp, modifier = Modifier.padding(12.dp))
                     }
                 }
-                item { Button(onOpenLava, Modifier.fillMaxWidth()) { Text("Support with LAVA") } }
-                item { OutlinedButton(onVerify, Modifier.fillMaxWidth()) { Text("Verify membership") } }
-                item { OutlinedButton(onOpenPatreon, Modifier.fillMaxWidth()) { Text("View Patreon plans") } }
+                if (allowExternalMemberships) {
+                    item { Button(onOpenLava, Modifier.fillMaxWidth()) { Text("Support with LAVA") } }
+                    item { OutlinedButton(onVerify, Modifier.fillMaxWidth()) { Text("Verify membership") } }
+                    item { OutlinedButton(onOpenPatreon, Modifier.fillMaxWidth()) { Text("View Patreon plans") } }
+                } else {
+                    item { Text("MHTalk Plus purchases are not offered in this Google Play build.", color = MHTalkMuted, fontSize = 12.sp) }
+                }
                 item { OutlinedButton(onDownloadMvDownloader, Modifier.fillMaxWidth()) { Text("Download MVDownloader") } }
                 item { OutlinedButton(onShare, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Share, null); Spacer(Modifier.width(8.dp)); Text("Share MHTalk") } }
             }

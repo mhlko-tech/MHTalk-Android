@@ -1,6 +1,6 @@
 # MHTalk Privacy Policy
 
-Effective date: August 26, 2026
+Effective date: August 30, 2026
 
 MHTalk is a realtime voice, video, screen-sharing and messaging application developed by MHTalk (`mhlko-tech`). This policy explains how the Android and Windows applications handle information.
 
@@ -20,11 +20,11 @@ Information is used only to provide room access, deliver realtime communication,
 
 ## Service providers and transmission
 
-Supabase hosts authentication and account data. Realtime media, messages and file streams are carried by LiveKit Cloud. MHTalk's Cloudflare Worker rate-limits account requests, privately resolves usernames, issues secure room tokens, moderates public text and accepts safety reports. Data is encrypted in transit using HTTPS/WSS and the security provided by WebRTC.
+Supabase hosts authentication, account data and private, expiring room attachments. Depending on current capacity, realtime media and short room events may be carried by Stream, Agora, Tencent, Cloudflare Realtime, Whereby, Daily or LiveKit. MHTalk's Cloudflare Worker selects only a route supported by the installed app, rate-limits account requests, privately resolves usernames, issues short-lived room and attachment capabilities, moderates public text and accepts safety reports. Data is encrypted in transit using HTTPS/WSS and the security provided by WebRTC.
 
 ## Storage and retention
 
-Account profiles, friend relationships, blocks and notification tokens remain in Supabase until the account data is deleted. Encrypted session tokens and local preferences remain on your device. Received attachments are stored in the app's temporary cache. Private-room invitation metadata expires after seven days. Safety reports expire after 30 days. Realtime room media is not recorded by MHTalk. Public and private chat history is not maintained as a permanent cloud archive by MHTalk.
+Account profiles, friend relationships, blocks and notification tokens remain in Supabase until the account data is deleted. Encrypted session tokens and local preferences remain on your device. Attachments sent through guarded routes are encrypted in transit, stored in a private Supabase bucket, and automatically expire after 24 hours for Free accounts or seven days for Plus accounts; received copies may remain in the app cache until cleared. Private-room invitation metadata expires after seven days. Safety reports expire after 30 days. Realtime room media is not recorded by MHTalk. Public and private chat history is not maintained as a permanent cloud archive by MHTalk.
 
 ## Your choices
 

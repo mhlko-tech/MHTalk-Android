@@ -32,4 +32,4 @@ MHTalk uses the same room system as the Windows desktop edition, so phone and PC
 
 ## Privacy policy URL after pushing this repository
 
-https://github.com/mhlko-tech/MhlkoTalk/blob/main/MHTalk%20Android/PRIVACY_POLICY.md
+https://github.com/mhlko-tech/MHTalk-Android/blob/main/PRIVACY_POLICY.md
