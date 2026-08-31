@@ -119,6 +119,16 @@ object PipController {
     var track by mutableStateOf<VideoTrack?>(null)
 }
 
+private val embeddedRtcProviders = setOf(
+    "100ms",
+    "cometchat",
+    "whereby",
+    "jaas",
+    "mirotalk",
+    "videosdk",
+    "daily",
+)
+
 @Composable
 fun MHTalkApp(session: SessionViewModel = viewModel()) {
     val state by session.state.collectAsStateWithLifecycle()
@@ -274,7 +284,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     Scaffold(
         containerColor = MHTalkBackground,
         bottomBar = {
-            if (state.roomName != null && state.rtcProvider !in setOf("daily", "whereby")) NavigationBar(containerColor = Color(0xFF101422)) {
+            if (state.roomName != null && state.rtcProvider !in embeddedRtcProviders) NavigationBar(containerColor = Color(0xFF101422)) {
                 NavigationBarItem(tab == 0, { tab = 0 }, { Icon(Icons.Rounded.Tag, "Room") }, label = { Text("Room") })
                 NavigationBarItem(tab == 1, { tab = 1 }, { Icon(Icons.Rounded.ChatBubble, "Chat") }, label = { Text("Chat") })
             }
@@ -299,7 +309,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                     onMain = { withCallPermission(session::joinMain) },
                     onPrivate = { privateSheet = true },
                 )
-                state.rtcProvider in setOf("daily", "whereby") -> EmbeddedPrebuiltRoom(
+                state.rtcProvider in embeddedRtcProviders -> EmbeddedPrebuiltRoom(
                     url = state.embeddedCallUrl,
                     onLeave = session::leave,
                 )
@@ -718,6 +728,7 @@ private fun StreamNativeRoom(call: StreamCall?, onLeave: () -> Unit) {
 @Composable
 private fun EmbeddedPrebuiltRoom(url: String?, onLeave: () -> Unit) {
     val context = LocalContext.current
+    val workerHost = remember { Uri.parse(BuildConfig.TOKEN_ENDPOINT).host.orEmpty().lowercase() }
     if (url.isNullOrBlank()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = MHTalkPurple)
@@ -754,8 +765,15 @@ private fun EmbeddedPrebuiltRoom(url: String?, onLeave: () -> Unit) {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val host = request.url.host.orEmpty().lowercase()
                     if (
+                        host == workerHost ||
                         host == "daily.co" || host.endsWith(".daily.co") || host.endsWith(".dailywebrtc.com") ||
-                        host == "whereby.com" || host.endsWith(".whereby.com")
+                        host == "whereby.com" || host.endsWith(".whereby.com") ||
+                        host == "8x8.vc" || host.endsWith(".8x8.vc") ||
+                        host == "100ms.live" || host.endsWith(".100ms.live") ||
+                        host == "videosdk.live" || host.endsWith(".videosdk.live") ||
+                        host == "cometchat.io" || host.endsWith(".cometchat.io") ||
+                        host == "opentok.com" || host.endsWith(".opentok.com") ||
+                        host == "129-159-223-64.sslip.io"
                     ) return false
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, request.url)) }
                     return true

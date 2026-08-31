@@ -142,7 +142,12 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             RtcProviderAdapter("agora", ::connectAgora),
             RtcProviderAdapter("tencent", ::connectTencent),
             RtcProviderAdapter("cloudflare-realtime", ::connectCloudflare),
+            RtcProviderAdapter("100ms", ::connectEmbedded),
+            RtcProviderAdapter("cometchat", ::connectEmbedded),
             RtcProviderAdapter("whereby", ::connectWhereby),
+            RtcProviderAdapter("jaas", ::connectEmbedded),
+            RtcProviderAdapter("mirotalk", ::connectEmbedded),
+            RtcProviderAdapter("videosdk", ::connectEmbedded),
             RtcProviderAdapter("daily", ::connectDaily),
             RtcProviderAdapter("livekit", ::connectLiveKit),
         ),
@@ -424,6 +429,11 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             .build()
             .toString()
         return RtcConnectionResult.Embedded(credentials.roomName, callUrl)
+    }
+
+    private suspend fun connectEmbedded(credentials: RoomCredentials): RtcConnectionResult {
+        require(credentials.serverUrl.isNotBlank()) { "Embedded call URL is missing" }
+        return RtcConnectionResult.Embedded(credentials.roomName, credentials.serverUrl)
     }
 
     /** Native Stream adapter. The API secret never reaches the device; the worker issues short-lived user tokens. */
