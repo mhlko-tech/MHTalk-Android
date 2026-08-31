@@ -9,6 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mhlko.talk.BuildConfig
 import com.mhlko.talk.data.SessionUiState
 import com.mhlko.talk.data.SubscriptionTier
 import com.mhlko.talk.data.subscriptionEntitlements
@@ -87,7 +88,11 @@ internal fun SettingsDialog(
                             Text("• Custom emojis, stickers, soundboard and invites", fontSize = 12.sp)
                         } else {
                             Text(
-                                "Use the yellow help button beside Friends to view LAVA and Patreon support options. Core calling and safety features remain free.",
+                                if (BuildConfig.PLAY_DISTRIBUTION) {
+                                    "Core calling and safety features remain free. Plus purchases are not offered in the Google Play build."
+                                } else {
+                                    "Use the yellow help button beside Friends to view available support options. Core calling and safety features remain free."
+                                },
                                 color = MHTalkMuted,
                                 fontSize = 11.sp,
                             )

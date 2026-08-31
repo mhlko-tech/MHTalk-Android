@@ -89,6 +89,7 @@ data class AttachmentUi(
     val name: String,
     val mimeType: String,
     val size: Long,
+    val storageId: String? = null,
     val progress: Float = 1f,
     val sending: Boolean = false,
 )

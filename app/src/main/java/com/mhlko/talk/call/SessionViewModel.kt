@@ -28,6 +28,7 @@ import androidx.lifecycle.viewModelScope
 import com.mhlko.talk.BuildConfig
 import com.mhlko.talk.auth.AuthRepository
 import com.mhlko.talk.data.ChatMessageUi
+import com.mhlko.talk.data.ClientServiceCapabilities
 import com.mhlko.talk.data.AttachmentUi
 import com.mhlko.talk.data.AvatarCropSelection
 import com.mhlko.talk.data.calculateAvatarCrop
@@ -67,6 +68,7 @@ import io.getstream.video.android.core.Call as StreamCall
 import io.getstream.video.android.core.GEO
 import io.getstream.video.android.core.StreamVideo
 import io.getstream.video.android.core.StreamVideoBuilder
+import io.getstream.android.video.generated.models.CustomVideoEvent
 import io.getstream.video.android.model.User as StreamUser
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -75,17 +77,20 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
+import org.json.JSONArray
 import java.util.UUID
 import java.io.File
 import java.io.FileOutputStream
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.time.Instant
 
 class SessionViewModel(application: Application) : AndroidViewModel(application) {
     private val auth = AuthRepository.get(application)
@@ -101,6 +106,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     )
     private var streamClient: StreamVideo? = null
     private var streamCall: StreamCall? = null
+    private var streamEventsJob: Job? = null
     private val agoraRtc = AgoraRtcSession(
         context = application,
         onMembers = ::syncAgoraParticipants,
@@ -141,6 +147,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             RtcProviderAdapter("livekit", ::connectLiveKit),
         ),
     )
+    private val supportedMessagingProviders = ClientServiceCapabilities.messagingProviders
+    private val supportedFileProviders = ClientServiceCapabilities.fileProviders
     private val profiles = mutableMapOf<String, UserProfile>()
     private var agoraMembers = emptyList<AgoraMember>()
     private var tencentMembers = emptyList<TencentMember>()
@@ -156,6 +164,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     private var updateJob: Job? = null
     private var wantedRoom: String? = null
     private var wantedInviteCode: String? = null
+    private var attachmentAccessToken: String? = null
+    private var usageAccessToken: String? = null
+    private var usageWindowStartedAt: Long? = null
+    private var usageReportJob: Job? = null
     private var userLeft = false
     private val attachmentJobs = mutableMapOf<String, Job>()
     private var voiceRecorder: MediaRecorder? = null
@@ -229,10 +241,23 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     fun clearPrivateCode() = _state.update { it.copy(privateCode = null) }
     fun showNotice(message: String) = _state.update { it.copy(notice = message) }
 
+    private suspend fun requestCredentials(
+        roomName: String,
+        inviteCode: String?,
+        rtcProviders: List<String>,
+    ) = api.credentials(
+        roomName = roomName,
+        inviteCode = inviteCode,
+        supportedRtcProviders = rtcProviders,
+        supportedMessagingProviders = supportedMessagingProviders,
+        supportedFileProviders = supportedFileProviders,
+    )
+
     private fun connect(roomName: String, inviteCode: String?) {
         if (_state.value.status == ConnectionStatus.Connecting) return
         viewModelScope.launch {
             clearRemoteTyping()
+            stopUsageReporting(flush = false)
             userLeft = false
             wantedRoom = roomName
             wantedInviteCode = inviteCode
@@ -246,8 +271,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     cloudflareRtc.disconnect()
                 }
                 val credentials = withTimeout(12_000) {
-                    api.credentials(roomName, inviteCode, rtcAdapters.supportedProviders)
+                    requestCredentials(roomName, inviteCode, rtcAdapters.supportedProviders)
                 }
+                attachmentAccessToken = credentials.attachmentAccessToken
+                usageAccessToken = credentials.usageAccessToken
                 _state.update {
                     it.copy(
                         subscriptionTier = credentials.subscriptionTier,
@@ -272,6 +299,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         messages = emptyList(),
                     )
                 }
+                startUsageReporting()
                 if (_state.value.rtcProvider == "livekit") {
                     syncParticipants()
                     disableAutoSubscribeForRemoteMedia()
@@ -280,7 +308,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     sendProfile()
                     requestProfiles()
                 }
-            }.onFailure(::showFailure)
+            }.onFailure {
+                stopUsageReporting(flush = false)
+                showFailure(it)
+            }
         }
     }
 
@@ -289,6 +320,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         userLeft = true
         wantedRoom = null
         wantedInviteCode = null
+        attachmentAccessToken = null
+        stopUsageReporting(flush = true)
         room.disconnect()
         disconnectStream()
         agoraRtc.disconnect()
@@ -314,6 +347,50 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         typingTimeoutJobs.clear()
         remoteTyping.clear()
         _state.update { it.copy(typingNames = emptyList()) }
+    }
+
+    private fun startUsageReporting() {
+        usageReportJob?.cancel()
+        if (usageAccessToken.isNullOrBlank()) return
+        usageWindowStartedAt = System.currentTimeMillis()
+        usageReportJob = viewModelScope.launch {
+            while (isActive) {
+                delay(60_000)
+                reportRtcUsage()
+            }
+        }
+    }
+
+    private fun stopUsageReporting(flush: Boolean) {
+        usageReportJob?.cancel()
+        usageReportJob = null
+        val token = usageAccessToken
+        val from = usageWindowStartedAt
+        val to = System.currentTimeMillis()
+        usageAccessToken = null
+        usageWindowStartedAt = null
+        if (flush && !token.isNullOrBlank() && from != null && to - from >= 10_000) {
+            viewModelScope.launch { reportRtcUsage(token, from, to, leaving = true) }
+        }
+    }
+
+    private suspend fun reportRtcUsage() {
+        val token = usageAccessToken ?: return
+        val from = usageWindowStartedAt ?: return
+        val to = System.currentTimeMillis()
+        if (to - from < 10_000) return
+        usageWindowStartedAt = to
+        runCatching { reportRtcUsage(token, from, to, leaving = false) }
+    }
+
+    private suspend fun reportRtcUsage(token: String, from: Long, to: Long, leaving: Boolean) {
+        api.reportRtcUsage(
+            usageAccessToken = token,
+            reportId = UUID.randomUUID().toString(),
+            measuredFrom = Instant.ofEpochMilli(from).toString(),
+            measuredTo = Instant.ofEpochMilli(to).toString(),
+            leaving = leaving,
+        )
     }
 
     fun toggleMicrophone() {
@@ -367,7 +444,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             user = user,
             token = credentials.token,
             legacyTokenProvider = { _ ->
-                val refreshed = api.credentials(
+                val refreshed = requestCredentials(
                     credentials.roomName,
                     wantedInviteCode,
                     listOf("stream"),
@@ -389,11 +466,23 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             disconnectStream()
             throw error
         }
+        streamEventsJob?.cancel()
+        streamEventsJob = viewModelScope.launch {
+            call.events.collect { event ->
+                if (event is CustomVideoEvent && event.user.id != identity) {
+                    handleProviderPayload(event.user.id, JSONObject(event.custom))
+                }
+            }
+        }
         startCallService(camera = false, screenShare = false)
+        sendProfile()
+        requestProfiles()
         return RtcConnectionResult.Native(credentials.roomName)
     }
 
     private fun disconnectStream() {
+        streamEventsJob?.cancel()
+        streamEventsJob = null
         streamCall?.leave()
         streamCall = null
         streamClient?.cleanup()
@@ -834,11 +923,19 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     fun deleteMessage(messageId: String) {
         if (_state.value.status != ConnectionStatus.Connected) return
+        val storedAttachment = _state.value.messages
+            .firstOrNull { it.id == messageId && it.mine }
+            ?.attachment
+            ?.storageId
         viewModelScope.launch {
             val payload = JSONObject().put("type", "delete").put("id", messageId)
             sendRoomPayload(payload)
             _state.update { current ->
                 current.copy(messages = current.messages.map { if (it.id == messageId) it.copy(body = "", attachment = null, deleted = true) else it })
+            }
+            val roomToken = attachmentAccessToken
+            if (storedAttachment != null && roomToken != null) {
+                runCatching { api.deleteAttachment(roomToken, storedAttachment) }
             }
         }
     }
@@ -853,7 +950,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             runCatching {
                 microphoneBeforeVoiceNote = _state.value.microphoneEnabled
-                if (microphoneBeforeVoiceNote) room.localParticipant.setMicrophoneEnabled(false)
+                if (microphoneBeforeVoiceNote) setMicrophoneState(false)
                 delay(180)
                 val directory = File(getApplication<Application>().cacheDir, "voice").apply { mkdirs() }
                 val file = File(directory, "voice-${System.currentTimeMillis()}.m4a")
@@ -871,7 +968,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 voiceRecorder = recorder
                 _state.update { it.copy(isRecordingVoice = true) }
             }.onFailure {
-                if (microphoneBeforeVoiceNote) room.localParticipant.setMicrophoneEnabled(true)
+                if (microphoneBeforeVoiceNote) setMicrophoneState(true)
                 showFailure(it)
             }
         }
@@ -887,7 +984,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             _state.update { it.copy(isRecordingVoice = false) }
             runCatching { recorder?.stop() }
             recorder?.release()
-            if (microphoneBeforeVoiceNote) room.localParticipant.setMicrophoneEnabled(true)
+            if (microphoneBeforeVoiceNote) setMicrophoneState(true)
             if (file != null && file.exists() && file.length() > 0) {
                 val uri = FileProvider.getUriForFile(getApplication(), "com.mhlko.talk.files", file)
                 sendAttachment(uri)
@@ -916,6 +1013,26 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     "${if (_state.value.subscriptionTier == SubscriptionTier.Plus) "MHTalk Plus" else "Free accounts"} can send files up to $maximumMb MB.",
                 ),
             )
+            return
+        }
+        if (size < 0) {
+            size = runCatching { resolver.openAssetFileDescriptor(uri, "r")?.length ?: -1L }.getOrDefault(-1L)
+        }
+        if (size > maximumBytes) {
+            val maximumMb = maximumBytes / 1024 / 1024
+            showFailure(
+                IllegalArgumentException(
+                    "${if (_state.value.subscriptionTier == SubscriptionTier.Plus) "MHTalk Plus" else "Free accounts"} can send files up to $maximumMb MB.",
+                ),
+            )
+            return
+        }
+        if (_state.value.fileProvider == "supabase-storage") {
+            if (size < 1) {
+                showFailure(IllegalArgumentException("Could not determine the attachment size"))
+                return
+            }
+            sendStoredAttachment(uri, name, mimeType, size)
             return
         }
         val id = UUID.randomUUID().toString()
@@ -981,7 +1098,12 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         }
         viewModelScope.launch {
             runCatching {
-                saveAttachmentWithMediaStore(attachment)
+                val roomToken = attachmentAccessToken
+                val freshAttachment = if (attachment.storageId != null && roomToken != null) {
+                    val ticket = api.attachmentDownloadTicket(roomToken, attachment.storageId)
+                    attachment.copy(uri = ticket.downloadUrl ?: attachment.uri)
+                } else attachment
+                saveAttachmentWithMediaStore(freshAttachment)
             }.onSuccess { _state.update { it.copy(notice = "Saved to Downloads") } }.onFailure(::showFailure)
         }
     }
@@ -1490,6 +1612,39 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     _state.update { it.copy(messages = it.messages + incoming) }
                     playEventTone(1)
                 }
+                "attachment" -> {
+                    val source = payload.optJSONObject("attachment") ?: return
+                    val attachmentId = source.optString("id")
+                    val messageId = payload.optString("id", UUID.randomUUID().toString())
+                    val roomToken = attachmentAccessToken ?: return
+                    if (attachmentId.isBlank()) return
+                    viewModelScope.launch {
+                        runCatching { api.attachmentDownloadTicket(roomToken, attachmentId) }
+                            .onSuccess { attachment ->
+                                val url = attachment.downloadUrl ?: return@onSuccess
+                                _state.update { current ->
+                                    current.copy(
+                                        messages = current.messages + ChatMessageUi(
+                                            id = messageId,
+                                            sender = profiles[identity]?.name ?: identity.take(16),
+                                            senderIdentity = identity,
+                                            body = "",
+                                            createdAt = payload.optLong("createdAt", System.currentTimeMillis()),
+                                            mine = false,
+                                            attachment = AttachmentUi(
+                                                uri = url,
+                                                name = attachment.fileName,
+                                                mimeType = attachment.mimeType,
+                                                size = attachment.size,
+                                                storageId = attachment.attachmentId,
+                                            ),
+                                        ),
+                                    )
+                                }
+                                playEventTone(1)
+                            }
+                    }
+                }
                 "edit" -> {
                     val id = payload.optString("id")
                     val body = payload.optString("body")
@@ -1677,7 +1832,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         val roomName = wantedRoom ?: return
         viewModelScope.launch {
             runCatching {
-                api.credentials(roomName, wantedInviteCode, listOf("agora"))
+                requestCredentials(roomName, wantedInviteCode, listOf("agora"))
             }.onSuccess { credentials ->
                 if (credentials.provider == "agora") agoraRtc.renewCredentials(credentials)
             }
@@ -1784,6 +1939,11 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private suspend fun sendRoomPayload(payload: JSONObject) {
+        if (_state.value.rtcProvider == "stream") {
+            val call = streamCall ?: error("Stream call is not connected")
+            call.sendCustomEvent(payload.toStreamEvent()).getOrThrow()
+            return
+        }
         if (_state.value.rtcProvider == "cloudflare-realtime") {
             cloudflareRtc.send(payload)
             return
@@ -1800,6 +1960,88 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             payload.toString().toByteArray(),
             topic = "mhtalk.chat",
         ).getOrThrow()
+    }
+
+    private fun sendStoredAttachment(uri: Uri, name: String, mimeType: String, size: Long) {
+        val roomToken = attachmentAccessToken
+        if (roomToken == null) {
+            showFailure(IllegalStateException("Rejoin the room before sending attachments"))
+            return
+        }
+        val resolver = getApplication<Application>().contentResolver
+        val messageId = UUID.randomUUID().toString()
+        val pending = ChatMessageUi(
+            id = messageId,
+            sender = profile.name,
+            body = "",
+            createdAt = System.currentTimeMillis(),
+            mine = true,
+            attachment = AttachmentUi(uri.toString(), name, mimeType, size, progress = 0f, sending = true),
+        )
+        _state.update { it.copy(messages = it.messages + pending) }
+        attachmentJobs[messageId] = viewModelScope.launch {
+            runCatching {
+                val ticket = api.attachmentUploadTicket(roomToken, name, mimeType, size)
+                api.uploadSignedAttachment(
+                    uploadUrl = ticket.uploadUrl,
+                    mimeType = ticket.mimeType,
+                    size = ticket.size,
+                    openStream = { resolver.openInputStream(uri) ?: error("Could not read attachment") },
+                    onProgress = { progress -> patchAttachment(messageId) { it.copy(progress = progress) } },
+                )
+                val stored = api.completeAttachment(roomToken, ticket.attachmentId)
+                sendRoomPayload(
+                    JSONObject()
+                        .put("type", "attachment")
+                        .put("id", messageId)
+                        .put("createdAt", pending.createdAt)
+                        .put(
+                            "attachment",
+                            JSONObject()
+                                .put("id", stored.attachmentId)
+                                .put("name", stored.fileName)
+                                .put("mimeType", stored.mimeType)
+                                .put("size", stored.size),
+                        ),
+                )
+                stored
+            }.onSuccess { stored ->
+                patchAttachment(messageId) {
+                    it.copy(
+                        storageId = stored.attachmentId,
+                        name = stored.fileName,
+                        mimeType = stored.mimeType,
+                        size = stored.size,
+                        progress = 1f,
+                        sending = false,
+                    )
+                }
+            }.onFailure { error ->
+                if (error !is CancellationException) showFailure(error)
+                _state.update { current -> current.copy(messages = current.messages.filterNot { it.id == messageId }) }
+            }
+            attachmentJobs.remove(messageId)
+        }
+    }
+
+    private fun JSONObject.toStreamEvent(): Map<String, Any> = buildMap {
+        val iterator = keys()
+        while (iterator.hasNext()) {
+            val key = iterator.next()
+            streamEventValue(opt(key))?.let { put(key, it) }
+        }
+    }
+
+    private fun streamEventValue(value: Any?): Any? = when (value) {
+        null, JSONObject.NULL -> null
+        is JSONObject -> value.toStreamEvent()
+        is JSONArray -> buildList {
+            for (index in 0 until value.length()) {
+                streamEventValue(value.opt(index))?.let(::add)
+            }
+        }
+        is String, is Number, is Boolean -> value
+        else -> value.toString()
     }
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
@@ -1846,7 +2088,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 val name = wantedRoom ?: break
                 val result = runCatching {
                     val credentials = withTimeout(12_000) {
-                        api.credentials(name, wantedInviteCode, listOf("livekit"))
+                        requestCredentials(name, wantedInviteCode, listOf("livekit"))
                     }
                     require(credentials.provider == "livekit") {
                         "The selected call provider is not supported by this app version"
@@ -1914,6 +2156,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     override fun onCleared() {
         runCatching { getApplication<Application>().unregisterReceiver(taskRemovedReceiver) }
+        stopUsageReporting(flush = false)
         room.disconnect()
         disconnectStream()
         super.onCleared()

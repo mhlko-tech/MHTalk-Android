@@ -7,9 +7,11 @@ The app is visibly marked **Beta** while MHTalk uses zero-budget service
 allocations. It reports its supported realtime adapters to the routing broker
 and applies hard deadlines to token acquisition and room connection, preventing
 an unavailable provider from leaving the UI in an infinite loading state.
-Stream, Agora, Tencent, Whereby Embedded, Daily Prebuilt and native LiveKit are
-the currently shipped Android adapters; the server selects one compatible
-provider before the room opens.
+Stream, Agora, Tencent, Cloudflare Realtime, Whereby Embedded, Daily Prebuilt
+and native LiveKit are the currently shipped Android adapters. Capability
+contract version 2 requires a complete RTC, messaging and file route before the
+room opens. Stream events now power the native MHTalk chat, and guarded routes
+use private, expiring Supabase Storage attachments.
 
 The Android client uses the same production Supabase account system as the
 desktop client. It supports username/email password sign-in, registration, mandatory
@@ -30,3 +32,8 @@ The source layout and dependency rules are documented in
 The shared account database migration and Cloudflare authentication gateway live
 in the desktop repository. Official Android releases are published independently
 from the Windows client.
+
+Google Play builds set `MHTALK_PLAY_DISTRIBUTION=true` (the default) and do not
+show external membership purchase or verification controls. Do not change that
+setting for a Play artifact unless Play Billing or an approved alternative
+billing program is implemented.
