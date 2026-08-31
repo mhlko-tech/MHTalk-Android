@@ -93,7 +93,7 @@ jobs:
           test -x "$apksigner_path"
           "$apksigner_path" verify --verbose --print-certs "$apk_path" | tee signing-report.txt
 
-          actual_fingerprint="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signing-report.txt | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':')"
+          actual_fingerprint="$(sed -n 's/^.*certificate SHA-256 digest: //p' signing-report.txt | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':')"
           if [[ "$actual_fingerprint" != "$EXPECTED_SIGNING_SHA256" ]]; then
             echo "Unexpected Android signing certificate: $actual_fingerprint" >&2
             exit 1
