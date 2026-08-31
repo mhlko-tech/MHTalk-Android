@@ -33,6 +33,10 @@ The shared account database migration and Cloudflare authentication gateway live
 in the desktop repository. Official Android releases are published independently
 from the Windows client.
 
+Signed release builds are produced by the manual GitHub Actions workflow. See
+[`docs/RELEASE.md`](docs/RELEASE.md) for signing identity, verification, and
+publishing details.
+
 Google Play builds set `MHTALK_PLAY_DISTRIBUTION=true` (the default) and do not
 show external membership purchase or verification controls. Do not change that
 setting for a Play artifact unless Play Billing or an approved alternative
