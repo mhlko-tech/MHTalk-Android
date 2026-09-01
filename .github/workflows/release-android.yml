@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version name from app/build.gradle.kts (for example 1.6.0)
+        description: Version name from app/build.gradle.kts (for example 1.6.1)
         required: true
         type: string
 
@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 45
     env:
       RELEASE_VERSION: ${{ inputs.version }}
-      EXPECTED_SIGNING_SHA256: 20d40863256ca1d9902b4f917903cafdc7184e38d3d05d20954cc1c29614fdd1
+      EXPECTED_SIGNING_SHA256: 202d85e63b2af11aba0d44cfb31baaa14460193d2464344cd063f2e53cb6fc5d
     steps:
       - uses: actions/checkout@v7
 
@@ -67,17 +67,30 @@ jobs:
           chmod 600 "$keystore_path"
           echo "MHTALK_ANDROID_KEYSTORE=$keystore_path" >> "$GITHUB_ENV"
 
-      - name: Test, lint and build signed APK and AAB
+      - name: Test, lint and build signed direct APK
         shell: bash
         env:
           MHTALK_ANDROID_STORE_PASSWORD: ${{ secrets.MHTALK_ANDROID_STORE_PASSWORD }}
           MHTALK_ANDROID_KEY_ALIAS: ${{ secrets.MHTALK_ANDROID_KEY_ALIAS }}
           MHTALK_ANDROID_KEY_PASSWORD: ${{ secrets.MHTALK_ANDROID_KEY_PASSWORD }}
-          MHTALK_PLAY_DISTRIBUTION: "true"
         run: |
           set -euo pipefail
           chmod +x gradlew
-          ./gradlew --no-daemon testDebugUnitTest lintRelease assembleRelease bundleRelease
+          ./gradlew --no-daemon -PMHTALK_PLAY_DISTRIBUTION=false testDebugUnitTest lintRelease assembleRelease
+          grep -Fq 'public static final boolean PLAY_DISTRIBUTION = false;' \
+            app/build/generated/source/buildConfig/release/com/mhlko/talk/BuildConfig.java
+
+      - name: Build signed Google Play AAB
+        shell: bash
+        env:
+          MHTALK_ANDROID_STORE_PASSWORD: ${{ secrets.MHTALK_ANDROID_STORE_PASSWORD }}
+          MHTALK_ANDROID_KEY_ALIAS: ${{ secrets.MHTALK_ANDROID_KEY_ALIAS }}
+          MHTALK_ANDROID_KEY_PASSWORD: ${{ secrets.MHTALK_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon -PMHTALK_PLAY_DISTRIBUTION=true bundleRelease
+          grep -Fq 'public static final boolean PLAY_DISTRIBUTION = true;' \
+            app/build/generated/source/buildConfig/release/com/mhlko/talk/BuildConfig.java
 
       - name: Verify release signature and checksums
         id: verify
@@ -124,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="v$RELEASE_VERSION"
-          notes="Official MHTalk Android $RELEASE_VERSION release. This release uses the new long-term signing identity introduced for the official launch. Devices running an older GitHub APK signed with the retired key must uninstall it once before installing this version. Future releases update normally."
+          notes="Official MHTalk Android $RELEASE_VERSION corrective release. The direct APK uses the original long-term signing identity shared with MHTalk 1.5.x, so existing users can update normally. The APK keeps MHTalk's external membership controls; the accompanying AAB is the Google Play-safe build. If you installed the withdrawn GitHub v1.6.0 APK, uninstall that one version once before installing v1.6.1."
 
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$APK_PATH" "$AAB_PATH" signing-report.txt SHA256SUMS.txt --clobber

@@ -37,7 +37,8 @@ Signed release builds are produced by the manual GitHub Actions workflow. See
 [`docs/RELEASE.md`](docs/RELEASE.md) for signing identity, verification, and
 publishing details.
 
-Google Play builds set `MHTALK_PLAY_DISTRIBUTION=true` (the default) and do not
-show external membership purchase or verification controls. Do not change that
-setting for a Play artifact unless Play Billing or an approved alternative
-billing program is implemented.
+Direct APK builds default to `MHTALK_PLAY_DISTRIBUTION=false` and retain the
+external membership purchase and verification controls. Google Play AAB builds
+must explicitly set `MHTALK_PLAY_DISTRIBUTION=true`; those builds do not show
+external purchase or verification controls unless Play Billing or an approved
+alternative billing program is implemented.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.1 - 2026-09-01
+
+- Restored the original Android signing identity used by the 1.5.x releases.
+- Restored external membership controls in the direct-download APK.
+- Split release builds so only the Google Play AAB enables Play restrictions.
+
 ## 1.6.0 - 2026-08-30
 
 - Completed native Stream chat, typing, profile and attachment events.
