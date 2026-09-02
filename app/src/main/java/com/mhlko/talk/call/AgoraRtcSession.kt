@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Handler
+import android.os.Looper
 import android.view.SurfaceView
 import com.mhlko.talk.data.RoomCredentials
 import com.mhlko.talk.data.ShareQuality
@@ -37,17 +39,28 @@ internal class AgoraRtcSession(
     private val onPayload: (String, JSONObject) -> Unit,
     private val onConnectionState: (Int) -> Unit,
     private val onTokenRefreshNeeded: (Boolean) -> Unit,
+    private val onScreenShareStopped: () -> Unit,
 ) {
     private var engine: RtcEngineEx? = null
     private var credentials: RoomCredentials? = null
     private var mainConnection: RtcConnection? = null
     private var screenConnection: RtcConnection? = null
     private var projection: MediaProjection? = null
+    private var stoppingScreenShare = false
     private var dataStreamId = -1
     private val identitiesByUid = mutableMapOf<Int, String>()
     private val remoteByIdentity = mutableMapOf<String, AgoraMember>()
     private val speaking = mutableSetOf<String>()
     private var joined = CompletableDeferred<Unit>()
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            projection = null
+            engine?.stopScreenCapture()
+            screenConnection?.let { connection -> engine?.leaveChannelEx(connection) }
+            screenConnection = null
+            if (!stoppingScreenShare) onScreenShareStopped()
+        }
+    }
 
     val connected: Boolean
         get() = engine != null && joined.isCompleted
@@ -196,11 +209,13 @@ internal class AgoraRtcSession(
     }
 
     fun disconnect() {
+        stoppingScreenShare = true
         runCatching { engine?.stopScreenCapture() }
         runCatching { credentials?.screenIdentity?.let { account ->
             engine?.leaveChannelWithUserAccountEx(credentials?.roomName.orEmpty(), account)
         } }
         runCatching { engine?.leaveChannel() }
+        projection?.unregisterCallback(projectionCallback)
         projection?.stop()
         projection = null
         engine = null
@@ -213,6 +228,7 @@ internal class AgoraRtcSession(
         dataStreamId = -1
         if (joined.isActive) joined.cancel()
         runCatching { RtcEngine.destroy() }
+        stoppingScreenShare = false
         emitMembers()
     }
 
@@ -243,6 +259,7 @@ internal class AgoraRtcSession(
         val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projection = manager.getMediaProjection(Activity.RESULT_OK, permissionData)
             ?: error("Screen capture permission expired")
+        projection?.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
         rtc.setExternalMediaProjection(projection)
         val capture = screenCaptureParameters(quality)
         check(rtc.startScreenCapture(capture) == 0) { "Agora could not start screen capture" }
@@ -268,13 +285,17 @@ internal class AgoraRtcSession(
     }
 
     fun stopScreenShare() {
+        stoppingScreenShare = true
         val current = credentials
         current?.screenIdentity?.let { account ->
             engine?.leaveChannelWithUserAccountEx(current.roomName, account)
         }
         engine?.stopScreenCapture()
+        projection?.unregisterCallback(projectionCallback)
         projection?.stop()
         projection = null
+        screenConnection = null
+        stoppingScreenShare = false
     }
 
     fun send(payload: JSONObject) {

@@ -240,6 +240,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
         val missing = buildList {
             add(Manifest.permission.RECORD_AUDIO)
             add(Manifest.permission.CAMERA)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(Manifest.permission.BLUETOOTH_CONNECT)
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
         }.filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isEmpty()) action() else {

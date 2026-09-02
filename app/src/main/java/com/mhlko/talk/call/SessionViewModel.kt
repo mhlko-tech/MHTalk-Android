@@ -113,6 +113,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         onPayload = ::handleProviderPayload,
         onConnectionState = ::handleAgoraConnectionState,
         onTokenRefreshNeeded = { refreshAgoraCredentials() },
+        onScreenShareStopped = {
+            _state.update { it.copy(screenShareEnabled = false, screenShareAudioEnabled = false) }
+            startCallService(_state.value.cameraEnabled, screenShare = false)
+        },
     )
     private val tencentRtc = TencentRtcSession(
         context = application,
@@ -121,7 +125,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         onConnectionState = ::handleTencentConnectionState,
         onNetworkQuality = { _ -> Unit },
         onScreenShareStopped = {
-            _state.update { it.copy(screenShareEnabled = false) }
+            _state.update { it.copy(screenShareEnabled = false, screenShareAudioEnabled = false) }
             startCallService(_state.value.cameraEnabled, screenShare = false)
         },
     )
@@ -132,26 +136,45 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         onPayload = ::handleProviderPayload,
         onConnectionState = ::handleCloudflareConnectionState,
         onScreenShareStopped = {
-            _state.update { it.copy(screenShareEnabled = false) }
+            _state.update { it.copy(screenShareEnabled = false, screenShareAudioEnabled = false) }
             startCallService(_state.value.cameraEnabled, screenShare = false)
         },
     )
+    private val liveKitParityMedia = RtcMediaCapabilities(
+        nativeMhtalkControls = true,
+        independentScreenAudio = true,
+        stableCommunicationAudioRoute = true,
+        crossPlatformParity = true,
+    )
+    private val mixedScreenAudioMedia = RtcMediaCapabilities(
+        nativeMhtalkControls = true,
+        independentScreenAudio = false,
+        stableCommunicationAudioRoute = true,
+        crossPlatformParity = false,
+    )
+    private val embeddedMedia = RtcMediaCapabilities(
+        nativeMhtalkControls = false,
+        independentScreenAudio = false,
+        stableCommunicationAudioRoute = false,
+        crossPlatformParity = false,
+    )
     private val rtcAdapters = RtcAdapterRegistry(
         listOf(
-            RtcProviderAdapter("stream", ::connectStream),
-            RtcProviderAdapter("agora", ::connectAgora),
-            RtcProviderAdapter("tencent", ::connectTencent),
-            RtcProviderAdapter("cloudflare-realtime", ::connectCloudflare),
-            RtcProviderAdapter("100ms", ::connectEmbedded),
-            RtcProviderAdapter("cometchat", ::connectEmbedded),
-            RtcProviderAdapter("whereby", ::connectWhereby),
-            RtcProviderAdapter("jaas", ::connectEmbedded),
-            RtcProviderAdapter("mirotalk", ::connectEmbedded),
-            RtcProviderAdapter("videosdk", ::connectEmbedded),
-            RtcProviderAdapter("daily", ::connectDaily),
-            RtcProviderAdapter("livekit", ::connectLiveKit),
+            RtcProviderAdapter("stream", mixedScreenAudioMedia, ::connectStream),
+            RtcProviderAdapter("agora", liveKitParityMedia, ::connectAgora),
+            RtcProviderAdapter("tencent", liveKitParityMedia, ::connectTencent),
+            RtcProviderAdapter("cloudflare-realtime", mixedScreenAudioMedia, ::connectCloudflare),
+            RtcProviderAdapter("100ms", embeddedMedia, ::connectEmbedded),
+            RtcProviderAdapter("cometchat", embeddedMedia, ::connectEmbedded),
+            RtcProviderAdapter("whereby", embeddedMedia, ::connectWhereby),
+            RtcProviderAdapter("jaas", embeddedMedia, ::connectEmbedded),
+            RtcProviderAdapter("mirotalk", embeddedMedia, ::connectEmbedded),
+            RtcProviderAdapter("videosdk", embeddedMedia, ::connectEmbedded),
+            RtcProviderAdapter("daily", embeddedMedia, ::connectDaily),
+            RtcProviderAdapter("livekit", liveKitParityMedia, ::connectLiveKit),
         ),
     )
+    private val audioRouteController = CallAudioRouteController(application)
     private val supportedMessagingProviders = ClientServiceCapabilities.messagingProviders
     private val supportedFileProviders = ClientServiceCapabilities.fileProviders
     private val profiles = mutableMapOf<String, UserProfile>()
@@ -276,7 +299,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     cloudflareRtc.disconnect()
                 }
                 val credentials = withTimeout(12_000) {
-                    requestCredentials(roomName, inviteCode, rtcAdapters.supportedProviders)
+                    requestCredentials(roomName, inviteCode, rtcAdapters.routableProviders)
                 }
                 attachmentAccessToken = credentials.attachmentAccessToken
                 usageAccessToken = credentials.usageAccessToken
@@ -286,7 +309,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         rtcProvider = credentials.provider,
                         messagingProvider = credentials.messagingProvider,
                         fileProvider = credentials.fileProvider,
-                        connectionMessage = "Connecting through ${credentials.provider}…",
+                        connectionMessage = "Connecting to the room…",
                     )
                 }
                 when (val connection = rtcAdapters.connect(credentials)) {
@@ -294,6 +317,11 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     is RtcConnectionResult.Native -> Pair(connection.roomName, null)
                 }
             }.onSuccess { (actualRoom, embeddedCallUrl) ->
+                if (embeddedCallUrl == null && _state.value.rtcProvider != "livekit") {
+                    audioRouteController.start()
+                } else {
+                    audioRouteController.stop()
+                }
                 _state.update {
                     it.copy(
                         status = ConnectionStatus.Connected,
@@ -332,6 +360,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         agoraRtc.disconnect()
         tencentRtc.disconnect()
         cloudflareRtc.disconnect()
+        audioRouteController.stop()
         getApplication<Application>().stopService(Intent(getApplication(), CallService::class.java))
         _state.value = SessionUiState(
             termsAccepted = preferences.getBoolean("legal.termsAccepted", false),
@@ -460,7 +489,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     listOf("stream"),
                 )
                 require(refreshed.provider == "stream") {
-                    "The selected call provider changed while refreshing the Stream session"
+                    "The room connection changed while refreshing"
                 }
                 refreshed.token
             },
@@ -600,24 +629,33 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 } else if (_state.value.rtcProvider == "agora") {
                     agoraRtc.startScreenShare(permissionData, allowedQuality)
                 } else if (_state.value.rtcProvider == "stream") {
-                    streamCall?.startScreenSharing(permissionData)
+                    streamCall?.startScreenSharing(permissionData, includeAudio = true)
                         ?: error("Stream call is not connected")
                 } else {
                     room.localParticipant.setScreenShareEnabled(
                         true,
                         ScreenCaptureParams(permissionData) {
                             stopScreenAudio()
-                            _state.update { it.copy(screenShareEnabled = false) }
+                            _state.update { it.copy(screenShareEnabled = false, screenShareAudioEnabled = false) }
                             startCallService(_state.value.cameraEnabled, screenShare = false)
                         },
                     )
                 }
             }.onSuccess {
+                var screenAudioEnabled = false
                 if (_state.value.rtcProvider == "livekit" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startScreenAudio()
+                    screenAudioEnabled = startScreenAudio()
+                } else if (_state.value.rtcProvider in setOf("agora", "tencent")) {
+                    screenAudioEnabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
                 }
                 setMicrophoneState(includeMicrophone)
-                _state.update { it.copy(screenShareEnabled = true, microphoneEnabled = includeMicrophone) }
+                _state.update {
+                    it.copy(
+                        screenShareEnabled = true,
+                        screenShareAudioEnabled = screenAudioEnabled,
+                        microphoneEnabled = includeMicrophone,
+                    )
+                }
                 if (_state.value.rtcProvider == "livekit") syncParticipants()
             }.onFailure {
                 startCallService(_state.value.cameraEnabled, screenShare = false)
@@ -644,7 +682,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
                 .onSuccess {
-                    _state.update { it.copy(screenShareEnabled = false) }
+                    _state.update { it.copy(screenShareEnabled = false, screenShareAudioEnabled = false) }
                     startCallService(_state.value.cameraEnabled, screenShare = false)
                     if (_state.value.rtcProvider == "livekit") syncParticipants()
                 }
@@ -2055,11 +2093,12 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
-    private suspend fun startScreenAudio() {
-        if (ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
-        val screenTrack = room.localParticipant.getTrackPublication(Track.Source.SCREEN_SHARE)?.track as? LocalVideoTrack ?: return
+    private suspend fun startScreenAudio(): Boolean {
+        if (ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return false
+        val screenTrack = room.localParticipant.getTrackPublication(Track.Source.SCREEN_SHARE)?.track as? LocalVideoTrack ?: return false
         stopScreenAudio()
-        ScreenAudioCapturer.createFromScreenShareTrack(screenTrack)?.let { capturer ->
+        val capturer = ScreenAudioCapturer.createFromScreenShareTrack(screenTrack) ?: return false
+        capturer.let {
             val audioTrack = room.localParticipant.createAudioTrack(
                 "MHTalk screen audio",
                 LocalAudioTrackOptions(
@@ -2078,6 +2117,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             screenAudioTrack = audioTrack
             screenAudioCapturer = capturer
         }
+        return true
     }
 
     private fun stopScreenAudio() {
@@ -2101,7 +2141,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         requestCredentials(name, wantedInviteCode, listOf("livekit"))
                     }
                     require(credentials.provider == "livekit") {
-                        "The selected call provider is not supported by this app version"
+                        "This app version cannot open the selected room connection"
                     }
                     _state.update {
                         it.copy(
@@ -2109,7 +2149,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                             rtcProvider = credentials.provider,
                             messagingProvider = credentials.messagingProvider,
                             fileProvider = credentials.fileProvider,
-                            connectionMessage = "Connecting through ${credentials.provider}…",
+                            connectionMessage = "Connecting to the room…",
                         )
                     }
                     configureCameraQuality(credentials.subscriptionTier)
@@ -2169,6 +2209,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         stopUsageReporting(flush = false)
         room.disconnect()
         disconnectStream()
+        agoraRtc.disconnect()
+        tencentRtc.disconnect()
+        cloudflareRtc.disconnect()
+        audioRouteController.stop()
         super.onCleared()
     }
 }

@@ -101,6 +101,7 @@ data class SessionUiState(
     val microphoneEnabled: Boolean = true,
     val cameraEnabled: Boolean = false,
     val screenShareEnabled: Boolean = false,
+    val screenShareAudioEnabled: Boolean = false,
     val localSpeaking: Boolean = false,
     val members: List<MemberUi> = emptyList(),
     val messages: List<ChatMessageUi> = emptyList(),
