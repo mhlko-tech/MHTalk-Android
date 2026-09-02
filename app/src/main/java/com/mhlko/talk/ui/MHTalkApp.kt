@@ -132,12 +132,9 @@ data class PipMediaTarget(
 )
 
 private val embeddedRtcProviders = setOf(
-    "100ms",
-    "cometchat",
     "whereby",
     "jaas",
     "mirotalk",
-    "videosdk",
     "daily",
 )
 
@@ -853,9 +850,6 @@ private fun EmbeddedPrebuiltRoom(url: String?, onLeave: () -> Unit) {
                         host == "daily.co" || host.endsWith(".daily.co") || host.endsWith(".dailywebrtc.com") ||
                         host == "whereby.com" || host.endsWith(".whereby.com") ||
                         host == "8x8.vc" || host.endsWith(".8x8.vc") ||
-                        host == "100ms.live" || host.endsWith(".100ms.live") ||
-                        host == "videosdk.live" || host.endsWith(".videosdk.live") ||
-                        host == "cometchat.io" || host.endsWith(".cometchat.io") ||
                         host == "opentok.com" || host.endsWith(".opentok.com") ||
                         host == "129-159-223-64.sslip.io"
                     ) return false

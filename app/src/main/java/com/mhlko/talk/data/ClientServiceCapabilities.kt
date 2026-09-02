@@ -29,7 +29,7 @@ object ClientServiceCapabilities {
         "agora" -> CompanionServiceRoute("agora-data", "supabase-storage")
         "tencent" -> CompanionServiceRoute("tencent-data", "supabase-storage")
         "cloudflare-realtime" -> CompanionServiceRoute("cloudflare-realtime", "supabase-storage")
-        "100ms", "cometchat", "jaas", "mirotalk", "videosdk" ->
+        "jaas", "mirotalk" ->
             CompanionServiceRoute("supabase-realtime", "supabase-storage")
         "whereby" -> CompanionServiceRoute("whereby-chat", "whereby-prebuilt")
         "daily" -> CompanionServiceRoute("daily-chat", "daily-prebuilt")
