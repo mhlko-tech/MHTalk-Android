@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.2 - 2026-09-02
+
+- Updated the native Stream video SDK to restore reliable remote camera and screen-share rendering across Android and desktop peers.
+
 ## 1.6.1 - 2026-09-01
 
 - Restored the original Android signing identity used by the 1.5.x releases.

@@ -137,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="v$RELEASE_VERSION"
-          notes="Official MHTalk Android $RELEASE_VERSION corrective release. The direct APK uses the original long-term signing identity shared with MHTalk 1.5.x, so existing users can update normally. The APK keeps MHTalk's external membership controls; the accompanying AAB is the Google Play-safe build. If you installed the withdrawn GitHub v1.6.0 APK, uninstall that one version once before installing v1.6.1."
+          notes="Official MHTalk Android $RELEASE_VERSION release. This update restores reliable remote camera and screen-share video between Android and Windows. The direct APK uses MHTalk's original long-term signing identity, so existing users can update normally; the accompanying AAB is the Google Play-safe build."
 
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$APK_PATH" "$AAB_PATH" signing-report.txt SHA256SUMS.txt --clobber
