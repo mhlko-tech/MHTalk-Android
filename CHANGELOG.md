@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.3 - 2026-09-02
+
+- Restored the screen-share action in the native Stream room.
+- Routed the Stream leave button through MHTalk session cleanup so it exits immediately.
+
 ## 1.6.2 - 2026-09-02
 
 - Updated the native Stream video SDK to restore reliable remote camera and screen-share rendering across Android and desktop peers.

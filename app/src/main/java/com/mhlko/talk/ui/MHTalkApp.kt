@@ -104,6 +104,8 @@ import io.livekit.android.room.track.VideoQuality
 import io.getstream.video.android.core.Call as StreamCall
 import io.getstream.video.android.compose.theme.VideoTheme
 import io.getstream.video.android.compose.ui.components.call.activecall.CallContent
+import io.getstream.video.android.compose.ui.components.call.controls.actions.DefaultOnCallActionHandler
+import io.getstream.video.android.core.call.state.LeaveCall
 import io.livekit.android.renderer.SurfaceViewRenderer
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.launch
@@ -316,6 +318,11 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                 state.rtcProvider == "stream" && tab == 0 -> StreamNativeRoom(
                     call = session.activeStreamCall(),
                     onLeave = session::leave,
+                    screenShareEnabled = state.screenShareEnabled,
+                    onScreenShare = {
+                        if (state.screenShareEnabled) session.stopScreenShare()
+                        else shareOptionsOpen = true
+                    },
                 )
                 tab == 0 -> ActiveRoom(
                     state,
@@ -709,7 +716,12 @@ private fun Header(
 }
 
 @Composable
-private fun StreamNativeRoom(call: StreamCall?, onLeave: () -> Unit) {
+private fun StreamNativeRoom(
+    call: StreamCall?,
+    onLeave: () -> Unit,
+    screenShareEnabled: Boolean,
+    onScreenShare: () -> Unit,
+) {
     if (call == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = MHTalkPurple)
@@ -717,13 +729,33 @@ private fun StreamNativeRoom(call: StreamCall?, onLeave: () -> Unit) {
         return
     }
     VideoTheme {
-        CallContent(
-            modifier = Modifier.fillMaxSize(),
-            call = call,
-            onBackPressed = onLeave,
-        )
+        Box(Modifier.fillMaxSize()) {
+            CallContent(
+                modifier = Modifier.fillMaxSize(),
+                call = call,
+                onBackPressed = onLeave,
+                onCallAction = { action ->
+                    if (isStreamLeaveAction(action)) onLeave()
+                    else DefaultOnCallActionHandler.onCallAction(call, action)
+                },
+            )
+            FilledTonalButton(
+                onClick = onScreenShare,
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 68.dp, end = 12.dp),
+            ) {
+                Icon(
+                    if (screenShareEnabled) Icons.Rounded.StopCircle else Icons.Rounded.PresentToAll,
+                    contentDescription = null,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(if (screenShareEnabled) "Stop sharing" else "Share screen")
+            }
+        }
     }
 }
+
+internal fun isStreamLeaveAction(action: io.getstream.video.android.core.call.state.CallAction) =
+    action is LeaveCall
 
 @Composable
 private fun EmbeddedPrebuiltRoom(url: String?, onLeave: () -> Unit) {
