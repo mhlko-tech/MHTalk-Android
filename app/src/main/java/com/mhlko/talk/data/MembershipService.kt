@@ -22,7 +22,7 @@ object MembershipService {
     data class SyncResult(val status: String, val tier: SubscriptionTier, val pending: Boolean)
 
     suspend fun createLavaSession(context: Context, accessToken: String, planId: String = "plus"): String = withContext(Dispatchers.IO) {
-        require(planId == "plus" || planId == "pro") { "Unsupported membership plan" }
+        require(planId in setOf("plus", "pro", "ultimate", "max_supporter")) { "Unsupported membership plan" }
         val origin = BuildConfig.TOKEN_ENDPOINT.substringBefore("/livekit/token")
         val request = Request.Builder()
             .url("$origin/subscription/lava/start")

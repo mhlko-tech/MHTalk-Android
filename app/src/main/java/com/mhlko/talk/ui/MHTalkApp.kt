@@ -2262,17 +2262,38 @@ private fun SupportDialog(
                         MembershipPlanCard(
                             selected = selectedPlan == "pro",
                             title = "Pro",
-                            price = "\$10 / month",
-                            summary = "MHTalk Pro badge and all paid features, with unlimited source-quality MVDownloader video and audio up to 320 kbps.",
+                            price = "\$7 / month",
+                            summary = "MHTalk Pro badge and all paid features, with unlimited MVDownloader 1080p, 720p and high-quality audio.",
                             onClick = { selectedPlan = "pro" },
                         )
                     }
-                    item { Button({ onOpenLava(selectedPlan) }, Modifier.fillMaxWidth()) { Text("Continue with LAVA · ${if (selectedPlan == "plus") "\$5" else "\$10"}") } }
+                    item {
+                        MembershipPlanCard(
+                            selected = selectedPlan == "ultimate",
+                            title = "Ultimate",
+                            price = "\$10 / month",
+                            summary = "Unlimited 2K, 4K and higher MVDownloader quality, plus the Ultimate recognition badge in MHTalk. Paid MHTalk features are not included.",
+                            onClick = { selectedPlan = "ultimate" },
+                        )
+                    }
+                    item {
+                        MembershipPlanCard(
+                            selected = selectedPlan == "max_supporter",
+                            title = "Max Supporter",
+                            price = "\$15 / month",
+                            summary = "All Ultimate MVDownloader benefits plus extra project support and the Max Supporter recognition badge in MHTalk. Paid MHTalk features are not included.",
+                            onClick = { selectedPlan = "max_supporter" },
+                        )
+                    }
+                    item {
+                        val price = mapOf("plus" to 5, "pro" to 7, "ultimate" to 10, "max_supporter" to 15).getValue(selectedPlan)
+                        Button({ onOpenLava(selectedPlan) }, Modifier.fillMaxWidth()) { Text("Continue with LAVA · \$$price") }
+                    }
                     item { OutlinedButton(onVerify, Modifier.fillMaxWidth()) { Text("Verify membership") } }
                     item { OutlinedButton(onOpenPatreon, Modifier.fillMaxWidth()) { Text("View Patreon plans") } }
                     item { OutlinedButton(onLinkPatreon, Modifier.fillMaxWidth()) { Text("Link Patreon membership") } }
                 } else {
-                    item { Text("MHTalk Plus purchases are not offered in this Google Play build.", color = MHTalkMuted, fontSize = 12.sp) }
+                    item { Text("External memberships are not offered in this Google Play build.", color = MHTalkMuted, fontSize = 12.sp) }
                 }
                 item { OutlinedButton(onDownloadMvDownloader, Modifier.fillMaxWidth()) { Text("Download MVDownloader") } }
                 item { OutlinedButton(onShare, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Share, null); Spacer(Modifier.width(8.dp)); Text("Share MHTalk") } }
