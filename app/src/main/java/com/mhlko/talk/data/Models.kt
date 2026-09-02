@@ -27,7 +27,7 @@ fun subscriptionTierFromWire(value: String?): SubscriptionTier = when (value?.tr
 }
 
 fun SubscriptionTier.hasMembershipBadge() = this != SubscriptionTier.Free
-fun SubscriptionTier.isPaid() = this == SubscriptionTier.Plus || this == SubscriptionTier.Pro
+fun SubscriptionTier.isPaid() = this != SubscriptionTier.Free
 
 data class SubscriptionEntitlements(
     val maxCameraQuality: ShareQuality,
@@ -42,9 +42,7 @@ data class SubscriptionEntitlements(
 )
 
 fun subscriptionEntitlements(tier: SubscriptionTier) = when (tier) {
-    SubscriptionTier.Free,
-    SubscriptionTier.Ultimate,
-    SubscriptionTier.MaxSupporter -> SubscriptionEntitlements(
+    SubscriptionTier.Free -> SubscriptionEntitlements(
         maxCameraQuality = ShareQuality.Medium,
         maxScreenShareQuality = ShareQuality.Medium,
         maxAttachmentBytes = 20L * 1024 * 1024,
@@ -55,8 +53,20 @@ fun subscriptionEntitlements(tier: SubscriptionTier) = when (tier) {
         customInvites = false,
         savedRoomLimit = 3,
     )
-    SubscriptionTier.Plus,
-    SubscriptionTier.Pro -> SubscriptionEntitlements(
+    SubscriptionTier.Plus -> SubscriptionEntitlements(
+        maxCameraQuality = ShareQuality.High,
+        maxScreenShareQuality = ShareQuality.High,
+        maxAttachmentBytes = 20L * 1024 * 1024,
+        attachmentRetentionHours = 24,
+        animatedProfile = false,
+        customAppearance = false,
+        customEmojiAndSoundboard = false,
+        customInvites = false,
+        savedRoomLimit = 3,
+    )
+    SubscriptionTier.Pro,
+    SubscriptionTier.Ultimate,
+    SubscriptionTier.MaxSupporter -> SubscriptionEntitlements(
         maxCameraQuality = ShareQuality.High,
         maxScreenShareQuality = ShareQuality.High,
         maxAttachmentBytes = 100L * 1024 * 1024,

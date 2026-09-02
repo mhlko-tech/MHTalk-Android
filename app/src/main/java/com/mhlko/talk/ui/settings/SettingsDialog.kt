@@ -84,12 +84,12 @@ internal fun SettingsDialog(
                         Text("• Clear voice calls and microphone noise cancellation", fontSize = 12.sp)
                         Text("• Camera and screen sharing up to ${if (subscriptionTier.isPaid()) "1080p" else "720p"}", fontSize = 12.sp)
                         Text("• Files up to ${entitlements.maxAttachmentBytes / 1024 / 1024} MB", fontSize = 12.sp)
-                        if (subscriptionTier.isPaid()) {
+                        if (entitlements.customAppearance) {
                             Text("• Animated profiles, banners, themes and frames", fontSize = 12.sp)
                             Text("• Custom emojis, stickers, soundboard and invites", fontSize = 12.sp)
-                        } else if (subscriptionTier != SubscriptionTier.Free) {
+                        } else if (subscriptionTier == SubscriptionTier.Plus) {
                             Text(
-                                "• Recognition badge only; this tier does not unlock paid MHTalk features",
+                                "• Plus focuses on 1080p sharing and highest-quality recording; Pro adds customization and expanded limits",
                                 color = MHTalkMuted,
                                 fontSize = 11.sp,
                             )

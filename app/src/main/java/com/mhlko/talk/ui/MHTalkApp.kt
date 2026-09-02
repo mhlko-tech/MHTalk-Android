@@ -2254,7 +2254,7 @@ private fun SupportDialog(
                             selected = selectedPlan == "plus",
                             title = "Plus",
                             price = "\$5 / month",
-                            summary = "MHTalk Plus badge and paid features, plus unlimited MVDownloader audio and 720p with 10 Full HD downloads every 24 hours.",
+                            summary = "MHTalk Plus badge, 1080p camera and screen sharing, and highest-quality screen recording; plus unlimited MVDownloader audio and 720p with 10 Full HD downloads every 24 hours.",
                             onClick = { selectedPlan = "plus" },
                         )
                     }
@@ -2263,7 +2263,7 @@ private fun SupportDialog(
                             selected = selectedPlan == "pro",
                             title = "Pro",
                             price = "\$7 / month",
-                            summary = "MHTalk Pro badge and all paid features, with unlimited MVDownloader 1080p, 720p and high-quality audio.",
+                            summary = "Everything in MHTalk Plus, plus 100 MB files, longer retention, profiles, themes, frames, emojis, soundboard and custom invites; with unlimited MVDownloader 1080p and high-quality audio.",
                             onClick = { selectedPlan = "pro" },
                         )
                     }
@@ -2272,7 +2272,7 @@ private fun SupportDialog(
                             selected = selectedPlan == "ultimate",
                             title = "Ultimate",
                             price = "\$10 / month",
-                            summary = "Unlimited 2K, 4K and higher MVDownloader quality, plus the Ultimate recognition badge in MHTalk. Paid MHTalk features are not included.",
+                            summary = "Unlimited 2K, 4K and higher MVDownloader quality, plus every MHTalk Pro feature with the exclusive Ultimate badge.",
                             onClick = { selectedPlan = "ultimate" },
                         )
                     }
@@ -2281,7 +2281,7 @@ private fun SupportDialog(
                             selected = selectedPlan == "max_supporter",
                             title = "Max Supporter",
                             price = "\$15 / month",
-                            summary = "All Ultimate MVDownloader benefits plus extra project support and the Max Supporter recognition badge in MHTalk. Paid MHTalk features are not included.",
+                            summary = "All Ultimate MVDownloader benefits plus extra project support, with every MHTalk Pro feature and the exclusive Max Supporter badge.",
                             onClick = { selectedPlan = "max_supporter" },
                         )
                     }

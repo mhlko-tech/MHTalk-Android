@@ -1059,7 +1059,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             val maximumMb = maximumBytes / 1024 / 1024
             showFailure(
                 IllegalArgumentException(
-                    "${if (_state.value.subscriptionTier.isPaid()) "Paid MHTalk members" else "Free accounts"} can send files up to $maximumMb MB.",
+                    "Your current plan can send files up to $maximumMb MB.",
                 ),
             )
             return
@@ -1071,7 +1071,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             val maximumMb = maximumBytes / 1024 / 1024
             showFailure(
                 IllegalArgumentException(
-                    "${if (_state.value.subscriptionTier.isPaid()) "Paid MHTalk members" else "Free accounts"} can send files up to $maximumMb MB.",
+                    "Your current plan can send files up to $maximumMb MB.",
                 ),
             )
             return

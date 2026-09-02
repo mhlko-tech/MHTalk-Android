@@ -16,25 +16,26 @@ class SubscriptionPlanTest {
     }
 
     @Test
-    fun plusPlanUnlocksQualityAndAppearance() {
+    fun plusPlanUnlocksHdMediaWithoutProCustomization() {
         val plan = subscriptionEntitlements(SubscriptionTier.Plus)
         assertEquals(ShareQuality.High, plan.maxCameraQuality)
-        assertEquals(100L * 1024 * 1024, plan.maxAttachmentBytes)
-        assertTrue(plan.animatedProfile)
-        assertTrue(plan.customAppearance)
+        assertEquals(ShareQuality.High, plan.maxScreenShareQuality)
+        assertEquals(20L * 1024 * 1024, plan.maxAttachmentBytes)
+        assertFalse(plan.animatedProfile)
+        assertFalse(plan.customAppearance)
     }
 
     @Test
-    fun paidBadgesKeepCanonicalNamesWithoutAddingFeaturesAbovePro() {
+    fun higherTiersKeepCanonicalBadgesAndInheritAllProFeatures() {
         assertEquals(SubscriptionTier.Plus, subscriptionTierFromWire("plus"))
         assertEquals(SubscriptionTier.Pro, subscriptionTierFromWire("pro"))
         assertEquals(SubscriptionTier.Ultimate, subscriptionTierFromWire("ultimate"))
         assertEquals(SubscriptionTier.MaxSupporter, subscriptionTierFromWire("max_supporter"))
-        assertEquals(subscriptionEntitlements(SubscriptionTier.Free), subscriptionEntitlements(SubscriptionTier.Ultimate))
-        assertEquals(subscriptionEntitlements(SubscriptionTier.Free), subscriptionEntitlements(SubscriptionTier.MaxSupporter))
+        assertEquals(subscriptionEntitlements(SubscriptionTier.Pro), subscriptionEntitlements(SubscriptionTier.Ultimate))
+        assertEquals(subscriptionEntitlements(SubscriptionTier.Pro), subscriptionEntitlements(SubscriptionTier.MaxSupporter))
         assertTrue(SubscriptionTier.Pro.isPaid())
-        assertFalse(SubscriptionTier.Ultimate.isPaid())
-        assertFalse(SubscriptionTier.MaxSupporter.isPaid())
+        assertTrue(SubscriptionTier.Ultimate.isPaid())
+        assertTrue(SubscriptionTier.MaxSupporter.isPaid())
         assertTrue(SubscriptionTier.Ultimate.hasMembershipBadge())
         assertFalse(SubscriptionTier.Free.isPaid())
     }
