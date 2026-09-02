@@ -23,4 +23,19 @@ class SubscriptionPlanTest {
         assertTrue(plan.animatedProfile)
         assertTrue(plan.customAppearance)
     }
+
+    @Test
+    fun paidBadgesKeepCanonicalNamesWithoutAddingFeaturesAbovePro() {
+        assertEquals(SubscriptionTier.Plus, subscriptionTierFromWire("plus"))
+        assertEquals(SubscriptionTier.Pro, subscriptionTierFromWire("pro"))
+        assertEquals(SubscriptionTier.Ultimate, subscriptionTierFromWire("ultimate"))
+        assertEquals(SubscriptionTier.MaxSupporter, subscriptionTierFromWire("max_supporter"))
+        assertEquals(subscriptionEntitlements(SubscriptionTier.Free), subscriptionEntitlements(SubscriptionTier.Ultimate))
+        assertEquals(subscriptionEntitlements(SubscriptionTier.Free), subscriptionEntitlements(SubscriptionTier.MaxSupporter))
+        assertTrue(SubscriptionTier.Pro.isPaid())
+        assertFalse(SubscriptionTier.Ultimate.isPaid())
+        assertFalse(SubscriptionTier.MaxSupporter.isPaid())
+        assertTrue(SubscriptionTier.Ultimate.hasMembershipBadge())
+        assertFalse(SubscriptionTier.Free.isPaid())
+    }
 }

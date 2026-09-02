@@ -7,6 +7,7 @@ import android.util.Base64
 import android.util.Log
 import com.mhlko.talk.BuildConfig
 import com.mhlko.talk.data.SubscriptionTier
+import com.mhlko.talk.data.subscriptionTierFromWire
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
@@ -310,15 +311,8 @@ class AuthRepository private constructor(context: Context) {
     suspend fun handleDeepLink(uri: Uri?): Boolean {
         if (uri?.scheme != "mhtalk" || uri.host != "auth" || uri.path !in setOf("/callback", "/reset")) return false
         val recovery = uri.path == "/reset"
-        val fragment = uri.fragment?.split('&')?.mapNotNull { part ->
-            val pieces = part.split('=', limit = 2)
-            if (pieces.size == 2) Uri.decode(pieces[0]) to Uri.decode(pieces[1]) else null
-        }?.toMap().orEmpty()
-        val fragmentAccess = fragment["access_token"]
-        val fragmentRefresh = fragment["refresh_token"]
-        if (fragmentAccess != null && fragmentRefresh != null) {
-            storeTokens(fragmentAccess, fragmentRefresh, fragment["expires_in"]?.toLongOrNull() ?: 3600)
-            if (recovery) _state.value = AuthState.PasswordRecovery else refreshProfile()
+        if (!uri.fragment.isNullOrBlank()) {
+            _state.value = AuthState.Failed("This sign-in link uses an unsafe legacy token format. Please start sign-in again.")
             return true
         }
         val code = uri.getQueryParameter("code") ?: run {
@@ -366,11 +360,10 @@ class AuthRepository private constructor(context: Context) {
                 displayName = profile.getString("display_name"), avatarUrl = profile.optString("avatar_url").takeIf(String::isNotBlank),
                 bio = profile.optString("bio").takeIf(String::isNotBlank),
                 subscriptionTier = if (
-                    profile.optString("subscription_tier") == "plus" &&
-                    (subscriptionExpiry == null || runCatching {
+                    subscriptionExpiry == null || runCatching {
                         java.time.Instant.parse(subscriptionExpiry).toEpochMilli() > System.currentTimeMillis()
-                    }.getOrDefault(false))
-                ) SubscriptionTier.Plus else SubscriptionTier.Free,
+                    }.getOrDefault(false)
+                ) subscriptionTierFromWire(profile.optString("subscription_tier")) else SubscriptionTier.Free,
             )
             preferences.edit().putString("account.id", account.id).putString("account.username", account.username)
                 .putString("account.name", account.displayName).putString("account.avatar", account.avatarUrl)

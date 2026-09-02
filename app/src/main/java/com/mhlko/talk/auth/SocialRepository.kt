@@ -2,6 +2,8 @@ package com.mhlko.talk.auth
 
 import android.content.Context
 import com.mhlko.talk.BuildConfig
+import com.mhlko.talk.data.SubscriptionTier
+import com.mhlko.talk.data.subscriptionTierFromWire
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +34,7 @@ data class FriendProfile(
     val bio: String?,
     val online: Boolean = false,
     val isFriend: Boolean = false,
+    val subscriptionTier: SubscriptionTier = SubscriptionTier.Free,
 )
 data class IncomingFriendRequest(val requestId: String, val profile: FriendProfile)
 data class RoomInvite(val id: String, val senderId: String, val roomName: String, val inviteCode: String?)
@@ -174,6 +177,7 @@ class SocialRepository private constructor(context: Context) {
     private fun profile(value: JSONObject) = FriendProfile(
         id = value.getString("id"), username = value.getString("username"), displayName = value.getString("display_name"),
         avatarUrl = value.optString("avatar_url").takeIf(String::isNotBlank), bio = value.optString("bio").takeIf(String::isNotBlank),
+        subscriptionTier = subscriptionTierFromWire(value.optString("subscription_tier")),
     )
     private fun invite(value: JSONObject) = RoomInvite(
         id = value.getString("id"), senderId = value.getString("senderId"), roomName = value.getString("roomName"),

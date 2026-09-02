@@ -93,11 +93,14 @@ import com.mhlko.talk.data.ChatMessageUi
 import com.mhlko.talk.data.ShareQuality
 import com.mhlko.talk.data.StartupUpdatePhase
 import com.mhlko.talk.data.SubscriptionTier
+import com.mhlko.talk.data.isPaid
+import com.mhlko.talk.data.hasMembershipBadge
 import com.mhlko.talk.auth.AuthRepository
 import com.mhlko.talk.auth.AuthState
 import com.mhlko.talk.auth.SocialRepository
 import com.mhlko.talk.ui.auth.RequiredSignInScreen
 import com.mhlko.talk.ui.components.ProfileAvatar
+import com.mhlko.talk.ui.components.MembershipBadge
 import com.mhlko.talk.ui.theme.*
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
@@ -274,6 +277,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                 name = signedIn.account.displayName,
                 bio = signedIn.account.bio.orEmpty(),
                 avatar = signedIn.account.avatarUrl ?: signedIn.account.displayName.take(1).uppercase(),
+                subscriptionTier = signedIn.account.subscriptionTier,
             ),
             syncAccount = false,
         )
@@ -441,14 +445,14 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     if (showSupport) SupportDialog(
         onDismiss = { showSupport = false },
         allowExternalMemberships = !BuildConfig.PLAY_DISTRIBUTION,
-        onOpenLava = {
+        onOpenLava = { planId ->
             appScope.launch {
                 val accessToken = auth.accessToken()
                 if (accessToken == null) {
                     membershipMessage = "Sign in before starting a membership."
                     return@launch
                 }
-                runCatching { MembershipService.createLavaSession(context, accessToken) }
+                runCatching { MembershipService.createLavaSession(context, accessToken, planId) }
                     .onSuccess {
                         membershipMessage = "Complete payment in your browser, then return and choose Verify membership."
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it)))
@@ -468,7 +472,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                     .onSuccess { result ->
                         membershipMessage = when {
                             result == null -> "Start a LAVA membership first."
-                            result.tier == SubscriptionTier.Plus -> "MHTalk Plus is active on this account."
+                            result.tier.hasMembershipBadge() -> "MHTalk ${result.tier.displayName} is active on this account."
                             result.pending -> "Payment confirmation is still pending."
                             else -> "No active LAVA membership was found."
                         }
@@ -478,6 +482,21 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
             }
         },
         onOpenPatreon = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.patreon.com/cw/MhlkoVD/membership"))) },
+        onLinkPatreon = {
+            appScope.launch {
+                val accessToken = auth.accessToken()
+                if (accessToken == null) {
+                    membershipMessage = "Sign in before linking Patreon."
+                    return@launch
+                }
+                runCatching { MembershipService.createPatreonLink(context, accessToken) }
+                    .onSuccess {
+                        membershipMessage = "Finish linking in Patreon, then return and choose Verify membership."
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it)))
+                    }
+                    .onFailure { membershipMessage = it.message ?: "Could not link Patreon membership" }
+            }
+        },
         onDownloadMvDownloader = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/mhlko-tech/MVDownloader/releases/latest"))) },
         onShare = {
             context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
@@ -950,6 +969,7 @@ private fun ActiveRoom(
                         false,
                         state.localProfile.bio,
                         state.localProfile.avatar,
+                        state.subscriptionTier,
                     ),
                     true,
                     onClick = { selectedMember = it },
@@ -1049,7 +1069,10 @@ private fun ActiveRoom(
     selectedMember?.let { member ->
         AlertDialog(
             onDismissRequest = { selectedMember = null },
-            title = { Text(member.name) },
+            title = { Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(member.name)
+                MembershipBadge(member.subscriptionTier, Modifier.padding(start = 7.dp))
+            } },
             text = {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
                     ProfileAvatar(
@@ -1157,7 +1180,7 @@ private fun ShareOptionsDialog(
                 Spacer(Modifier.height(12.dp))
                 Text("Video quality", fontWeight = FontWeight.Bold)
                 ShareQuality.entries.forEach { option ->
-                    val enabled = option != ShareQuality.High || subscriptionTier == SubscriptionTier.Plus
+                    val enabled = option != ShareQuality.High || subscriptionTier.isPaid()
                     Row(
                         Modifier.fillMaxWidth().clickable(enabled = enabled) { quality = option },
                         verticalAlignment = Alignment.CenterVertically,
@@ -1706,7 +1729,10 @@ private fun MemberRow(member: MemberUi, mine: Boolean, onClick: (MemberUi) -> Un
                 background = if (mine) MHTalkPurple else Color(0xFF343A59),
             )
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                Text(member.name, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(member.name, fontWeight = FontWeight.Bold)
+                    MembershipBadge(member.subscriptionTier, Modifier.padding(start = 6.dp))
+                }
                 Text(if (member.microphoneEnabled) "Mic on" else "Listening", color = MHTalkMuted, fontSize = 12.sp)
             }
             if (member.cameraEnabled) Icon(Icons.Rounded.Videocam, "Camera on", tint = MHTalkGreen)
@@ -2184,13 +2210,15 @@ private fun formatBytes(size: Long): String = when {
 private fun SupportDialog(
     onDismiss: () -> Unit,
     allowExternalMemberships: Boolean,
-    onOpenLava: () -> Unit,
+    onOpenLava: (String) -> Unit,
     membershipMessage: String,
     onVerify: () -> Unit,
     onOpenPatreon: () -> Unit,
+    onLinkPatreon: () -> Unit,
     onDownloadMvDownloader: () -> Unit,
     onShare: () -> Unit,
 ) {
+    var selectedPlan by remember { mutableStateOf("plus") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -2214,16 +2242,35 @@ private fun SupportDialog(
                         }
                     }
                 }
-                if (allowExternalMemberships) item { Text("One active membership is planned to unlock premium features in both MHTalk and MVDownloader.", color = MHTalkMuted, fontSize = 12.sp) }
+                 if (allowExternalMemberships) item { Text("One verified membership unlocks premium features in MHTalk on Windows and Android and in MVDownloader.", color = MHTalkMuted, fontSize = 12.sp) }
                 if (allowExternalMemberships && membershipMessage.isNotBlank()) item {
                     Surface(color = Color(0xFF172C26), shape = RoundedCornerShape(10.dp)) {
                         Text(membershipMessage, color = MHTalkGreen, fontSize = 12.sp, modifier = Modifier.padding(12.dp))
                     }
                 }
-                if (allowExternalMemberships) {
-                    item { Button(onOpenLava, Modifier.fillMaxWidth()) { Text("Support with LAVA") } }
+                 if (allowExternalMemberships) {
+                    item {
+                        MembershipPlanCard(
+                            selected = selectedPlan == "plus",
+                            title = "Plus",
+                            price = "\$5 / month",
+                            summary = "MHTalk Plus badge and paid features, plus unlimited MVDownloader audio and 720p with 10 Full HD downloads every 24 hours.",
+                            onClick = { selectedPlan = "plus" },
+                        )
+                    }
+                    item {
+                        MembershipPlanCard(
+                            selected = selectedPlan == "pro",
+                            title = "Pro",
+                            price = "\$10 / month",
+                            summary = "MHTalk Pro badge and all paid features, with unlimited source-quality MVDownloader video and audio up to 320 kbps.",
+                            onClick = { selectedPlan = "pro" },
+                        )
+                    }
+                    item { Button({ onOpenLava(selectedPlan) }, Modifier.fillMaxWidth()) { Text("Continue with LAVA · ${if (selectedPlan == "plus") "\$5" else "\$10"}") } }
                     item { OutlinedButton(onVerify, Modifier.fillMaxWidth()) { Text("Verify membership") } }
                     item { OutlinedButton(onOpenPatreon, Modifier.fillMaxWidth()) { Text("View Patreon plans") } }
+                    item { OutlinedButton(onLinkPatreon, Modifier.fillMaxWidth()) { Text("Link Patreon membership") } }
                 } else {
                     item { Text("MHTalk Plus purchases are not offered in this Google Play build.", color = MHTalkMuted, fontSize = 12.sp) }
                 }
@@ -2233,6 +2280,30 @@ private fun SupportDialog(
         },
         confirmButton = { TextButton(onDismiss) { Text("Close") } },
     )
+}
+
+@Composable
+private fun MembershipPlanCard(
+    selected: Boolean,
+    title: String,
+    price: String,
+    summary: String,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        color = if (selected) Color(0xFF29234A) else Color(0xFF171B2B),
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Color(0xFF8B78FF) else Color(0xFF39415E)),
+    ) {
+        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(title, color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Black)
+                Text(price, color = MHTalkGreen, fontWeight = FontWeight.Bold)
+            }
+            Text(summary, color = MHTalkMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        }
+    }
 }
 
 @Composable

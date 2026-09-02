@@ -94,9 +94,9 @@ class MHTalkApi(private val accessToken: () -> String? = { null }) {
                 ?: BuildConfig.LIVEKIT_URL,
             clientKey = payload.optJSONObject("routing")?.optJSONObject("rtc")
                 ?.optString("clientKey")?.takeIf(String::isNotBlank),
-            subscriptionTier = if (
-                payload.optJSONObject("subscription")?.optString("tier") == "plus"
-            ) SubscriptionTier.Plus else SubscriptionTier.Free,
+            subscriptionTier = subscriptionTierFromWire(
+                payload.optJSONObject("subscription")?.optString("tier"),
+            ),
             messagingProvider = payload.optJSONObject("routing")?.optJSONObject("messaging")
                 ?.optString("provider")?.takeIf(String::isNotBlank) ?: "livekit-data",
             fileProvider = payload.optJSONObject("routing")?.optJSONObject("files")
@@ -125,6 +125,16 @@ class MHTalkApi(private val accessToken: () -> String? = { null }) {
         "$origin/room-count",
         JSONObject().put("roomName", "Main"),
     ).optInt("count", 0)
+
+    suspend fun membershipBadges(ids: List<String>): Map<String, SubscriptionTier> {
+        if (ids.isEmpty()) return emptyMap()
+        val payload = post(
+            "$origin/social/badges",
+            JSONObject().put("ids", org.json.JSONArray().apply { ids.distinct().take(50).forEach(::put) }),
+        )
+        val badges = payload.optJSONObject("badges") ?: return emptyMap()
+        return badges.keys().asSequence().associateWith { id -> subscriptionTierFromWire(badges.optString(id)) }
+    }
 
     suspend fun moderate(text: String): String = post(
         "$origin/moderate",

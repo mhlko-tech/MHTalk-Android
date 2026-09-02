@@ -22,6 +22,7 @@ import com.mhlko.talk.auth.AuthState
 import com.mhlko.talk.auth.FriendProfile
 import com.mhlko.talk.auth.IncomingFriendRequest
 import com.mhlko.talk.ui.components.ProfileAvatar
+import com.mhlko.talk.ui.components.MembershipBadge
 import com.mhlko.talk.ui.theme.MHTalkGreen
 import com.mhlko.talk.ui.theme.MHTalkMuted
 import kotlinx.coroutines.launch
@@ -69,7 +70,10 @@ internal fun FriendsDialog(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             SocialAvatar(authState.account.avatarUrl, authState.account.displayName)
                             Column(Modifier.padding(start = 10.dp).weight(1f)) {
-                                Text(authState.account.displayName, fontWeight = FontWeight.Bold)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(authState.account.displayName, fontWeight = FontWeight.Bold)
+                                    MembershipBadge(authState.account.subscriptionTier, Modifier.padding(start = 6.dp))
+                                }
                                 Text("@${authState.account.username}", color = MHTalkMuted, fontSize = 12.sp)
                             }
                             TextButton(onSignOut) { Text("Sign out") }
@@ -153,7 +157,10 @@ private fun SocialPerson(profile: FriendProfile, showPresence: Boolean = false, 
                 )
             }
             Column(Modifier.padding(start = 10.dp).weight(1f)) {
-                Text(profile.displayName, fontWeight = FontWeight.Bold, maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(profile.displayName, fontWeight = FontWeight.Bold, maxLines = 1)
+                    MembershipBadge(profile.subscriptionTier, Modifier.padding(start = 6.dp))
+                }
                 Text(if (showPresence) "${if (profile.online) "Online" else "Offline"} · @${profile.username}" else "@${profile.username}", color = MHTalkMuted, fontSize = 11.sp, maxLines = 1)
             }
             action()

@@ -41,6 +41,8 @@ import com.mhlko.talk.data.UserProfile
 import com.mhlko.talk.data.normalizeRoomAvatar
 import com.mhlko.talk.data.ShareQuality
 import com.mhlko.talk.data.SubscriptionTier
+import com.mhlko.talk.data.isPaid
+import com.mhlko.talk.data.subscriptionTierFromWire
 import com.mhlko.talk.data.subscriptionEntitlements
 import com.mhlko.talk.data.StartupUpdatePhase
 import io.livekit.android.audio.ScreenAudioCapturer
@@ -95,6 +97,8 @@ import java.time.Instant
 class SessionViewModel(application: Application) : AndroidViewModel(application) {
     private val auth = AuthRepository.get(application)
     private val api = MHTalkApi(auth::accessToken)
+    private val verifiedSubscriptionTiers = mutableMapOf<String, SubscriptionTier>()
+    private val pendingBadgeIds = mutableSetOf<String>()
     private val preferences = application.getSharedPreferences("mhtalk", 0)
     private val room: Room = LiveKit.create(
         application,
@@ -854,7 +858,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun configureCameraQuality(tier: SubscriptionTier) {
-        val preset = if (tier == SubscriptionTier.Plus) {
+        val preset = if (tier.isPaid()) {
             io.livekit.android.room.track.VideoPreset169.H1080
         } else {
             io.livekit.android.room.track.VideoPreset169.H720
@@ -1055,7 +1059,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             val maximumMb = maximumBytes / 1024 / 1024
             showFailure(
                 IllegalArgumentException(
-                    "${if (_state.value.subscriptionTier == SubscriptionTier.Plus) "MHTalk Plus" else "Free accounts"} can send files up to $maximumMb MB.",
+                    "${if (_state.value.subscriptionTier.isPaid()) "Paid MHTalk members" else "Free accounts"} can send files up to $maximumMb MB.",
                 ),
             )
             return
@@ -1067,7 +1071,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             val maximumMb = maximumBytes / 1024 / 1024
             showFailure(
                 IllegalArgumentException(
-                    "${if (_state.value.subscriptionTier == SubscriptionTier.Plus) "MHTalk Plus" else "Free accounts"} can send files up to $maximumMb MB.",
+                    "${if (_state.value.subscriptionTier.isPaid()) "Paid MHTalk members" else "Free accounts"} can send files up to $maximumMb MB.",
                 ),
             )
             return
@@ -1621,6 +1625,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         name = source.optString("name", identity.take(16)).trim().take(60).ifBlank { identity.take(16) },
                         bio = source.optString("bio").trim().take(240),
                         avatar = normalizeRoomAvatar(source.optString("avatar")),
+                        subscriptionTier = subscriptionTierFromWire(source.optString("subscriptionTier")),
                     )
                     if (remoteTyping.containsKey(identity)) {
                         remoteTyping[identity] = profiles[identity]?.name ?: identity.take(16)
@@ -1743,12 +1748,14 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                             screenShareEnabled = member.screenShareEnabled,
                             bio = remoteProfile?.bio.orEmpty(),
                             avatar = normalizeRoomAvatar(remoteProfile?.avatar.orEmpty()),
+                            subscriptionTier = verifiedSubscriptionTiers[member.identity] ?: SubscriptionTier.Free,
                             userVolume = userVolumes[member.identity] ?: 100,
                             streamVolume = streamVolumes[member.identity] ?: 100,
                         )
                     },
             )
         }
+        verifyMemberBadges(_state.value.members.map(MemberUi::identity))
     }
 
     private fun syncTencentParticipants(participants: List<TencentMember>) {
@@ -1785,12 +1792,14 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                             screenShareEnabled = member.screenShareEnabled,
                             bio = remoteProfile?.bio.orEmpty(),
                             avatar = normalizeRoomAvatar(remoteProfile?.avatar.orEmpty()),
+                            subscriptionTier = verifiedSubscriptionTiers[member.identity] ?: SubscriptionTier.Free,
                             userVolume = userVolumes[member.identity] ?: 100,
                             streamVolume = streamVolumes[member.identity] ?: 100,
                         )
                     },
             )
         }
+        verifyMemberBadges(_state.value.members.map(MemberUi::identity))
     }
 
     private fun syncCloudflareParticipants(participants: List<CloudflareMember>) {
@@ -1827,12 +1836,14 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                             screenShareEnabled = member.screenShareEnabled,
                             bio = remoteProfile?.bio.orEmpty(),
                             avatar = normalizeRoomAvatar(remoteProfile?.avatar.orEmpty()),
+                            subscriptionTier = verifiedSubscriptionTiers[member.identity] ?: SubscriptionTier.Free,
                             userVolume = userVolumes[member.identity] ?: 100,
                             streamVolume = streamVolumes[member.identity] ?: 100,
                         )
                     },
             )
         }
+        verifyMemberBadges(_state.value.members.map(MemberUi::identity))
     }
 
     private fun handleAgoraConnectionState(state: Int) {
@@ -1901,6 +1912,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 members = remote,
             )
         }
+        verifyMemberBadges(remote.map(MemberUi::identity))
     }
 
     private fun disableAutoSubscribeForRemoteMedia() {
@@ -1937,6 +1949,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             bio = dataProfile?.bio?.ifBlank { metadataProfile?.bio.orEmpty() }
                 ?: metadataProfile?.bio.orEmpty(),
             avatar = avatar,
+            subscriptionTier = verifiedSubscriptionTiers[id] ?: SubscriptionTier.Free,
             userVolume = userVolumes[id] ?: 100,
             streamVolume = streamVolumes[id] ?: 100,
         )
@@ -1953,12 +1966,14 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             .put("type", "profile")
             .put(
                 "profile",
-                JSONObject().put("name", value.name).put("bio", value.bio).put("avatar", safeAvatar),
+                JSONObject().put("name", value.name).put("bio", value.bio).put("avatar", safeAvatar)
+                    .put("subscriptionTier", _state.value.subscriptionTier.wireValue),
             )
         if (_state.value.rtcProvider == "livekit") {
             runCatching {
                 room.localParticipant.updateMetadata(
-                    JSONObject().put("name", value.name).put("bio", value.bio).put("avatar", safeAvatar).toString(),
+                    JSONObject().put("name", value.name).put("bio", value.bio).put("avatar", safeAvatar)
+                        .put("subscriptionTier", _state.value.subscriptionTier.wireValue).toString(),
                 )
             }
         }
@@ -1973,6 +1988,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             name = rawName.trim().take(60).ifBlank { identity.take(16) },
             bio = source.optString("bio").trim().take(240),
             avatar = normalizeRoomAvatar(rawAvatar),
+            subscriptionTier = subscriptionTierFromWire(source.optString("subscriptionTier")),
         )
     }.getOrNull()
 
@@ -2198,6 +2214,26 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 error = error.message ?: "Unexpected connection error",
                 connectionMessage = null,
             )
+        }
+    }
+
+    private fun verifyMemberBadges(identities: List<String>) {
+        val uuid = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
+        val missing = identities.distinct().filter { uuid.matches(it) && it !in verifiedSubscriptionTiers && it !in pendingBadgeIds }
+        if (missing.isEmpty()) return
+        pendingBadgeIds += missing
+        viewModelScope.launch {
+            runCatching { api.membershipBadges(missing) }
+                .onSuccess { badges ->
+                    missing.forEach { identity -> verifiedSubscriptionTiers[identity] = badges[identity] ?: SubscriptionTier.Free }
+                    when (_state.value.rtcProvider) {
+                        "livekit" -> syncParticipants()
+                        "agora" -> syncAgoraParticipantsFromState()
+                        "tencent" -> syncTencentParticipantsFromState()
+                        "cloudflare-realtime" -> syncCloudflareParticipantsFromState()
+                    }
+                }
+            pendingBadgeIds -= missing.toSet()
         }
     }
 

@@ -10,7 +10,24 @@ enum class ConnectionStatus {
 
 enum class ShareQuality { Low, Medium, High }
 
-enum class SubscriptionTier { Free, Plus }
+enum class SubscriptionTier(val wireValue: String, val displayName: String) {
+    Free("free", "Free"),
+    Plus("plus", "Plus"),
+    Pro("pro", "Pro"),
+    Ultimate("ultimate", "Ultimate"),
+    MaxSupporter("max_supporter", "Max Supporter"),
+}
+
+fun subscriptionTierFromWire(value: String?): SubscriptionTier = when (value?.trim()?.lowercase()) {
+    "plus" -> SubscriptionTier.Plus
+    "pro" -> SubscriptionTier.Pro
+    "ultimate" -> SubscriptionTier.Ultimate
+    "max_supporter" -> SubscriptionTier.MaxSupporter
+    else -> SubscriptionTier.Free
+}
+
+fun SubscriptionTier.hasMembershipBadge() = this != SubscriptionTier.Free
+fun SubscriptionTier.isPaid() = this == SubscriptionTier.Plus || this == SubscriptionTier.Pro
 
 data class SubscriptionEntitlements(
     val maxCameraQuality: ShareQuality,
@@ -25,7 +42,9 @@ data class SubscriptionEntitlements(
 )
 
 fun subscriptionEntitlements(tier: SubscriptionTier) = when (tier) {
-    SubscriptionTier.Free -> SubscriptionEntitlements(
+    SubscriptionTier.Free,
+    SubscriptionTier.Ultimate,
+    SubscriptionTier.MaxSupporter -> SubscriptionEntitlements(
         maxCameraQuality = ShareQuality.Medium,
         maxScreenShareQuality = ShareQuality.Medium,
         maxAttachmentBytes = 20L * 1024 * 1024,
@@ -36,7 +55,8 @@ fun subscriptionEntitlements(tier: SubscriptionTier) = when (tier) {
         customInvites = false,
         savedRoomLimit = 3,
     )
-    SubscriptionTier.Plus -> SubscriptionEntitlements(
+    SubscriptionTier.Plus,
+    SubscriptionTier.Pro -> SubscriptionEntitlements(
         maxCameraQuality = ShareQuality.High,
         maxScreenShareQuality = ShareQuality.High,
         maxAttachmentBytes = 100L * 1024 * 1024,
@@ -55,6 +75,7 @@ data class UserProfile(
     val name: String = "Me",
     val bio: String = "",
     val avatar: String = "",
+    val subscriptionTier: SubscriptionTier = SubscriptionTier.Free,
 )
 
 data class MemberUi(
@@ -66,6 +87,7 @@ data class MemberUi(
     val screenShareEnabled: Boolean,
     val bio: String = "",
     val avatar: String = "",
+    val subscriptionTier: SubscriptionTier = SubscriptionTier.Free,
     val userVolume: Int = 100,
     val streamVolume: Int = 100,
 )

@@ -6,3 +6,5 @@ local.properties
 app/build/
 app/google-services.json
 mhtalk-secrets.properties
+.env*
+!.env.example

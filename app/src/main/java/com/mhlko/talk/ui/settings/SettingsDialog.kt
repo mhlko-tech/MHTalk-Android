@@ -13,6 +13,7 @@ import com.mhlko.talk.BuildConfig
 import com.mhlko.talk.data.SessionUiState
 import com.mhlko.talk.data.SubscriptionTier
 import com.mhlko.talk.data.subscriptionEntitlements
+import com.mhlko.talk.data.isPaid
 import com.mhlko.talk.ui.theme.MHTalkMuted
 
 @Composable
@@ -78,14 +79,20 @@ internal fun SettingsDialog(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Text("MHTalk ${if (subscriptionTier == SubscriptionTier.Plus) "Plus" else "Free"}", fontWeight = FontWeight.Bold)
+                        Text("MHTalk ${subscriptionTier.displayName}", fontWeight = FontWeight.Bold)
                         Text("Your current account plan", color = MHTalkMuted, fontSize = 11.sp)
                         Text("• Clear voice calls and microphone noise cancellation", fontSize = 12.sp)
-                        Text("• Camera and screen sharing up to ${if (subscriptionTier == SubscriptionTier.Plus) "1080p" else "720p"}", fontSize = 12.sp)
+                        Text("• Camera and screen sharing up to ${if (subscriptionTier.isPaid()) "1080p" else "720p"}", fontSize = 12.sp)
                         Text("• Files up to ${entitlements.maxAttachmentBytes / 1024 / 1024} MB", fontSize = 12.sp)
-                        if (subscriptionTier == SubscriptionTier.Plus) {
+                        if (subscriptionTier.isPaid()) {
                             Text("• Animated profiles, banners, themes and frames", fontSize = 12.sp)
                             Text("• Custom emojis, stickers, soundboard and invites", fontSize = 12.sp)
+                        } else if (subscriptionTier != SubscriptionTier.Free) {
+                            Text(
+                                "• Recognition badge only; this tier does not unlock paid MHTalk features",
+                                color = MHTalkMuted,
+                                fontSize = 11.sp,
+                            )
                         } else {
                             Text(
                                 if (BuildConfig.PLAY_DISTRIBUTION) {

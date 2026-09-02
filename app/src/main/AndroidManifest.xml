@@ -41,7 +41,14 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="mhtalk" />
+                <data android:scheme="mhtalk" android:host="auth" android:pathPrefix="/callback" />
+                <data android:scheme="mhtalk" android:host="auth" android:pathPrefix="/reset" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="mhtalk" android:host="invite" android:pathPrefix="/" />
             </intent-filter>
         </activity>
         <service
