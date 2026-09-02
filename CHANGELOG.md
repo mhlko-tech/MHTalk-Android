@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.4 - 2026-09-02
+
+- Unified Full screen and Picture in Picture controls across Stream, LiveKit, Agora, Tencent and Cloudflare video surfaces.
+- Made camera and screen-share controls consistently visible without exposing provider changes.
+
 ## 1.6.3 - 2026-09-02
 
 - Restored the screen-share action in the native Stream room.

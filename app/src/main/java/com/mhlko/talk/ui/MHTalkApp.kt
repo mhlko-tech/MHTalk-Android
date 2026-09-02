@@ -28,6 +28,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.LocalActivity
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -118,8 +119,17 @@ import java.io.File
 
 object PipController {
     var inPictureInPicture by mutableStateOf(false)
-    var track by mutableStateOf<VideoTrack?>(null)
+    var target by mutableStateOf<PipMediaTarget?>(null)
 }
+
+data class PipMediaTarget(
+    val provider: String,
+    val identity: String?,
+    val source: String,
+    val label: String,
+    val liveKitTrack: VideoTrack? = null,
+    val streamCall: StreamCall? = null,
+)
 
 private val embeddedRtcProviders = setOf(
     "100ms",
@@ -141,7 +151,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     val socialState by social.state.collectAsStateWithLifecycle()
     val appScope = rememberCoroutineScope()
     if (PipController.inPictureInPicture) {
-        PipVideoScreen(PipController.track, session)
+        PipVideoScreen(PipController.target, session)
         return
     }
     var pendingShareOptions by remember { mutableStateOf<ShareOptions?>(null) }
@@ -728,16 +738,26 @@ private fun StreamNativeRoom(
         }
         return
     }
+    val activity = LocalActivity.current
+    var fullScreen by remember(call) { mutableStateOf(false) }
     VideoTheme {
         Box(Modifier.fillMaxSize()) {
-            CallContent(
-                modifier = Modifier.fillMaxSize(),
-                call = call,
-                onBackPressed = onLeave,
-                onCallAction = { action ->
-                    if (isStreamLeaveAction(action)) onLeave()
-                    else DefaultOnCallActionHandler.onCallAction(call, action)
-                },
+            StreamCallSurface(call, onLeave, Modifier.fillMaxSize())
+            UnifiedMediaButtons(
+                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+                onFullScreen = { fullScreen = true },
+                onPictureInPicture = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ({
+                    PipController.target = PipMediaTarget(
+                        provider = "stream-call",
+                        identity = null,
+                        source = "room",
+                        label = "MHTalk room",
+                        streamCall = call,
+                    )
+                    activity?.enterPictureInPictureMode(
+                        PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build(),
+                    )
+                }) else null,
             )
             FilledTonalButton(
                 onClick = onScreenShare,
@@ -752,6 +772,37 @@ private fun StreamNativeRoom(
             }
         }
     }
+    if (fullScreen) {
+        Dialog(
+            onDismissRequest = { fullScreen = false },
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false,
+            ),
+        ) {
+            Box(Modifier.fillMaxSize().background(MHTalkBackground)) {
+                VideoTheme { StreamCallSurface(call, onLeave, Modifier.fillMaxSize()) }
+                IconButton(
+                    onClick = { fullScreen = false },
+                    modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(18.dp)
+                        .size(48.dp).clip(RoundedCornerShape(13.dp)).background(Color(0xD9080A14)),
+                ) { Icon(Icons.Rounded.FullscreenExit, "Exit full screen", tint = Color.White) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StreamCallSurface(call: StreamCall, onLeave: () -> Unit, modifier: Modifier) {
+    CallContent(
+        modifier = modifier,
+        call = call,
+        onBackPressed = onLeave,
+        onCallAction = { action ->
+            if (isStreamLeaveAction(action)) onLeave()
+            else DefaultOnCallActionHandler.onCallAction(call, action)
+        },
+    )
 }
 
 internal fun isStreamLeaveAction(action: io.getstream.video.android.core.call.state.CallAction) =
@@ -1134,6 +1185,19 @@ private fun CloudflareVideoTile(
     source: CloudflareRtcSession.TrackSource,
     label: String,
 ) {
+    val mediaSource = if (source == CloudflareRtcSession.TrackSource.Screen) "screen" else "camera"
+    ProviderVideoTile("cloudflare-realtime", identity, mediaSource, label) { modifier ->
+        CloudflareVideoSurface(session, identity, source, modifier)
+    }
+}
+
+@Composable
+private fun CloudflareVideoSurface(
+    session: SessionViewModel,
+    identity: String?,
+    source: CloudflareRtcSession.TrackSource,
+    modifier: Modifier,
+) {
     var track by remember(identity, source) { mutableStateOf(session.cloudflareVideoTrack(identity, source)) }
     LaunchedEffect(identity, source) {
         repeat(80) {
@@ -1142,38 +1206,22 @@ private fun CloudflareVideoTile(
             delay(100)
         }
     }
-    Surface(
-        modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-        color = Color.Black,
-        shape = RoundedCornerShape(18.dp),
-    ) {
-        Box {
-            track?.let { activeTrack ->
-                AndroidView(
-                    factory = { context ->
-                        org.webrtc.SurfaceViewRenderer(context).also { renderer ->
-                            session.initializeCloudflareRenderer(renderer)
-                            renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
-                            renderer.setMirror(identity == null && source == CloudflareRtcSession.TrackSource.Camera)
-                            activeTrack.addSink(renderer)
-                        }
-                    },
-                    onRelease = { renderer ->
-                        activeTrack.removeSink(renderer)
-                        renderer.release()
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-            Text(
-                label,
-                modifier = Modifier.align(Alignment.BottomStart)
-                    .background(Color(0x99000000))
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-                color = Color.White,
-                fontSize = 12.sp,
-            )
-        }
+    track?.let { activeTrack ->
+        AndroidView(
+            factory = { context ->
+                org.webrtc.SurfaceViewRenderer(context).also { renderer ->
+                    session.initializeCloudflareRenderer(renderer)
+                    renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+                    renderer.setMirror(identity == null && source == CloudflareRtcSession.TrackSource.Camera)
+                    activeTrack.addSink(renderer)
+                }
+            },
+            onRelease = { renderer ->
+                activeTrack.removeSink(renderer)
+                renderer.release()
+            },
+            modifier = modifier,
+        )
     }
 }
 
@@ -1184,28 +1232,15 @@ private fun AgoraVideoTile(
     source: AgoraRtcSession.TrackSource,
     label: String,
 ) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-        color = Color.Black,
-        shape = RoundedCornerShape(18.dp),
-    ) {
-        Box {
-            AndroidView(
-                factory = { context ->
-                    session.agoraVideoView(context, identity, source)
-                        ?: android.widget.FrameLayout(context)
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
-            Text(
-                label,
-                modifier = Modifier.align(Alignment.BottomStart)
-                    .background(Color(0x99000000))
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-                color = Color.White,
-                fontSize = 12.sp,
-            )
-        }
+    val mediaSource = if (source == AgoraRtcSession.TrackSource.Screen) "screen" else "camera"
+    ProviderVideoTile("agora", identity, mediaSource, label) { modifier ->
+        AndroidView(
+            factory = { context ->
+                session.agoraVideoView(context, identity, source)
+                    ?: android.widget.FrameLayout(context)
+            },
+            modifier = modifier,
+        )
     }
 }
 
@@ -1216,27 +1251,135 @@ private fun TencentVideoTile(
     source: TencentRtcSession.TrackSource,
     label: String,
 ) {
+    val mediaSource = if (source == TencentRtcSession.TrackSource.Screen) "screen" else "camera"
+    ProviderVideoTile("tencent", identity, mediaSource, label) { modifier ->
+        AndroidView(
+            factory = { context ->
+                session.tencentVideoView(context, identity, source)
+                    ?: android.widget.FrameLayout(context)
+            },
+            modifier = modifier,
+        )
+    }
+}
+
+@Composable
+private fun ProviderVideoTile(
+    provider: String,
+    identity: String?,
+    source: String,
+    label: String,
+    renderer: @Composable (Modifier) -> Unit,
+) {
+    val activity = LocalActivity.current
+    var fullScreen by remember(provider, identity, source) { mutableStateOf(false) }
+    val aspectRatio = 16f / 9f
+    val target = PipMediaTarget(provider, identity, source, label)
+
     Surface(
-        modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+        modifier = Modifier.fillMaxWidth().aspectRatio(aspectRatio),
         color = Color.Black,
         shape = RoundedCornerShape(18.dp),
     ) {
         Box {
-            AndroidView(
-                factory = { context ->
-                    session.tencentVideoView(context, identity, source)
-                        ?: android.widget.FrameLayout(context)
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
+            if (!fullScreen) renderer(Modifier.fillMaxSize())
             Text(
                 label,
                 modifier = Modifier.align(Alignment.BottomStart)
-                    .background(Color(0x99000000))
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                    .background(Color(0xB8000000), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
                 color = Color.White,
                 fontSize = 12.sp,
             )
+            UnifiedMediaButtons(
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                onFullScreen = { fullScreen = true },
+                onPictureInPicture = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ({
+                    PipController.target = target
+                    activity?.enterPictureInPictureMode(
+                        PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build(),
+                    )
+                }) else null,
+            )
+        }
+    }
+
+    if (fullScreen) {
+        FullScreenMediaDialog(
+            aspectRatio = aspectRatio,
+            onDismiss = { fullScreen = false },
+            renderer = renderer,
+        )
+    }
+}
+
+@Composable
+private fun UnifiedMediaButtons(
+    modifier: Modifier = Modifier,
+    onFullScreen: () -> Unit,
+    onPictureInPicture: (() -> Unit)?,
+) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        IconButton(
+            onClick = onFullScreen,
+            modifier = Modifier.size(40.dp).clip(RoundedCornerShape(11.dp)).background(Color(0xD9080A14)),
+        ) { Icon(Icons.Rounded.Fullscreen, "Full screen", tint = Color.White) }
+        if (onPictureInPicture != null) {
+            IconButton(
+                onClick = onPictureInPicture,
+                modifier = Modifier.size(40.dp).clip(RoundedCornerShape(11.dp)).background(Color(0xD9080A14)),
+            ) { Icon(Icons.Rounded.PictureInPictureAlt, "Picture in picture", tint = Color.White) }
+        }
+    }
+}
+
+@Composable
+private fun FullScreenMediaDialog(
+    aspectRatio: Float,
+    onDismiss: () -> Unit,
+    renderer: @Composable (Modifier) -> Unit,
+) {
+    val activity = LocalActivity.current
+    val configuration = LocalConfiguration.current
+    DisposableEffect(activity) {
+        onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                val viewportRatio = with(LocalDensity.current) { maxWidth.toPx() / maxHeight.toPx().coerceAtLeast(1f) }
+                val fitModifier = if (aspectRatio >= viewportRatio) {
+                    Modifier.fillMaxWidth().aspectRatio(aspectRatio)
+                } else {
+                    Modifier.fillMaxHeight().aspectRatio(aspectRatio)
+                }
+                renderer(fitModifier)
+            }
+            Row(
+                Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(18.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                IconButton(
+                    onClick = {
+                        activity?.requestedOrientation = if (configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                        } else {
+                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        }
+                    },
+                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(13.dp)).background(Color(0xD9080A14)),
+                ) { Icon(Icons.Rounded.ScreenRotation, "Rotate", tint = Color.White) }
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(13.dp)).background(Color(0xD9080A14)),
+                ) { Icon(Icons.Rounded.FullscreenExit, "Exit full screen", tint = Color.White) }
+            }
         }
     }
 }
@@ -1249,8 +1392,8 @@ private fun VideoTile(
     isScreenShare: Boolean = false,
     member: MemberUi? = null,
 ) {
-    val context = LocalContext.current
-    var controlsVisible by remember(track) { mutableStateOf(isScreenShare) }
+    val activity = LocalActivity.current
+    var controlsVisible by remember(track) { mutableStateOf(true) }
     var fullScreen by remember(track) { mutableStateOf(false) }
     var soundMenuOpen by remember(track) { mutableStateOf(false) }
     var qualityMenuOpen by remember(track) { mutableStateOf(false) }
@@ -1284,9 +1427,9 @@ private fun VideoTile(
                 onAspectRatio = { aspectRatio = it },
             )
             Box(
-                Modifier.fillMaxSize().clickable { if (isScreenShare) controlsVisible = !controlsVisible },
+                Modifier.fillMaxSize().clickable { controlsVisible = !controlsVisible },
             ) {
-                if (!isScreenShare || controlsVisible) {
+                if (controlsVisible) {
                     Text(
                         label,
                         modifier = Modifier.align(Alignment.BottomStart).background(Color(0x99000000)).padding(horizontal = 10.dp, vertical = 5.dp),
@@ -1294,7 +1437,7 @@ private fun VideoTile(
                         fontSize = 12.sp,
                     )
                 }
-                if (isScreenShare && controlsVisible) {
+                if (controlsVisible) {
                     Row(
                         modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
                         horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -1348,23 +1491,23 @@ private fun VideoTile(
                                 }
                             }
                         }
-                        IconButton(
-                            onClick = { fullScreen = true },
-                            modifier = Modifier.size(40.dp).clip(CircleShape).background(Color(0xB8000000)),
-                        ) { Icon(Icons.Rounded.Fullscreen, "Full screen") }
-                        if (member != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            IconButton(
-                                onClick = {
-                                    PipController.track = track
-                                    (context as? Activity)?.enterPictureInPictureMode(
-                                        PictureInPictureParams.Builder()
-                                            .setAspectRatio(Rational((aspectRatio * 1_000).toInt().coerceAtLeast(1), 1_000))
-                                            .build(),
-                                    )
-                                },
-                                modifier = Modifier.size(40.dp).clip(CircleShape).background(Color(0xB8000000)),
-                            ) { Icon(Icons.Rounded.PictureInPictureAlt, "Picture in picture") }
-                        }
+                        UnifiedMediaButtons(
+                            onFullScreen = { fullScreen = true },
+                            onPictureInPicture = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ({
+                                PipController.target = PipMediaTarget(
+                                    provider = "livekit-track",
+                                    identity = member?.identity,
+                                    source = if (isScreenShare) "screen" else "camera",
+                                    label = label,
+                                    liveKitTrack = track,
+                                )
+                                activity?.enterPictureInPictureMode(
+                                    PictureInPictureParams.Builder()
+                                        .setAspectRatio(Rational((aspectRatio * 1_000).toInt().coerceAtLeast(1), 1_000))
+                                        .build(),
+                                )
+                            }) else null,
+                        )
                     }
                 }
             }
@@ -1372,7 +1515,7 @@ private fun VideoTile(
     }
 
     if (fullScreen) {
-        val activity = context as? Activity
+        val activity = LocalActivity.current
         val configuration = LocalConfiguration.current
         DisposableEffect(activity) {
             onDispose {
@@ -1434,23 +1577,56 @@ private fun VideoTile(
 }
 
 @Composable
-private fun PipVideoScreen(track: VideoTrack?, session: SessionViewModel) {
-    val context = LocalContext.current
+private fun PipVideoScreen(target: PipMediaTarget?, session: SessionViewModel) {
+    val activity = LocalActivity.current
     Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
-        track?.let { videoTrack ->
-            AdaptiveVideoRenderer(
-                track = videoTrack,
-                session = session,
-                modifier = Modifier.fillMaxSize(),
-                onAspectRatio = { ratio ->
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        (context as? Activity)?.setPictureInPictureParams(
-                            PictureInPictureParams.Builder()
-                                .setAspectRatio(Rational((ratio * 1_000).toInt().coerceAtLeast(1), 1_000))
-                                .build(),
-                        )
-                    }
+        when (target?.provider) {
+            "stream-call" -> target.streamCall?.let { call ->
+                VideoTheme {
+                    StreamCallSurface(call, {}, Modifier.fillMaxSize())
+                }
+            }
+            "livekit-track" -> target.liveKitTrack?.let { videoTrack ->
+                AdaptiveVideoRenderer(
+                    track = videoTrack,
+                    session = session,
+                    modifier = Modifier.fillMaxSize(),
+                    onAspectRatio = { ratio ->
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            activity?.setPictureInPictureParams(
+                                PictureInPictureParams.Builder()
+                                    .setAspectRatio(Rational((ratio * 1_000).toInt().coerceAtLeast(1), 1_000))
+                                    .build(),
+                            )
+                        }
+                    },
+                )
+            }
+            "cloudflare-realtime" -> CloudflareVideoSurface(
+                session,
+                target.identity,
+                if (target.source == "screen") CloudflareRtcSession.TrackSource.Screen else CloudflareRtcSession.TrackSource.Camera,
+                Modifier.fillMaxSize(),
+            )
+            "agora" -> AndroidView(
+                factory = { viewContext ->
+                    session.agoraVideoView(
+                        viewContext,
+                        target.identity,
+                        if (target.source == "screen") AgoraRtcSession.TrackSource.Screen else AgoraRtcSession.TrackSource.Camera,
+                    ) ?: android.widget.FrameLayout(viewContext)
                 },
+                modifier = Modifier.fillMaxSize(),
+            )
+            "tencent" -> AndroidView(
+                factory = { viewContext ->
+                    session.tencentVideoView(
+                        viewContext,
+                        target.identity,
+                        if (target.source == "screen") TencentRtcSession.TrackSource.Screen else TencentRtcSession.TrackSource.Camera,
+                    ) ?: android.widget.FrameLayout(viewContext)
+                },
+                modifier = Modifier.fillMaxSize(),
             )
         }
     }

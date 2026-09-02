@@ -66,6 +66,6 @@ class MainActivity : ComponentActivity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         PipController.inPictureInPicture = isInPictureInPictureMode
-        if (!isInPictureInPictureMode) PipController.track = null
+        if (!isInPictureInPictureMode) PipController.target = null
     }
 }
