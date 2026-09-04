@@ -256,6 +256,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
     var showHelp by remember { mutableStateOf(false) }
     var showSupport by remember { mutableStateOf(false) }
     var membershipMessage by remember { mutableStateOf("") }
+    var canDisconnectPatreon by remember { mutableStateOf(false) }
     var membershipSyncedAccount by remember { mutableStateOf<String?>(null) }
     var shareOptionsOpen by remember { mutableStateOf(false) }
     var pendingProfilePhoto by remember { mutableStateOf<Uri?>(null) }
@@ -461,6 +462,7 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
             }
         },
         membershipMessage = membershipMessage,
+        canDisconnectPatreon = canDisconnectPatreon,
         onVerify = {
             appScope.launch {
                 val accessToken = auth.accessToken()
@@ -470,9 +472,10 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                 }
                 runCatching { MembershipService.sync(context, accessToken) }
                     .onSuccess { result ->
+                        canDisconnectPatreon = result?.provider == "patreon" && result.tier.hasMembershipBadge()
                         membershipMessage = when {
                             result == null -> "Start a LAVA membership first."
-                            result.tier.hasMembershipBadge() -> "MHTalk ${result.tier.displayName} is active on this account."
+                            result.tier.hasMembershipBadge() -> "Plan: ${result.tier.displayName} · Source: ${result.provider.uppercase()} · Status: ${if (result.status == "gifted") "Gifted" else "Active"}"
                             result.pending -> "Payment confirmation is still pending."
                             else -> "No active LAVA membership was found."
                         }
@@ -495,6 +498,22 @@ fun MHTalkApp(session: SessionViewModel = viewModel()) {
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it)))
                     }
                     .onFailure { membershipMessage = it.message ?: "Could not link Patreon membership" }
+            }
+        },
+        onDisconnectMembership = {
+            appScope.launch {
+                val accessToken = auth.accessToken()
+                if (accessToken == null) {
+                    membershipMessage = "Sign in before disconnecting a membership."
+                    return@launch
+                }
+                runCatching { MembershipService.disconnect(context, accessToken) }
+                    .onSuccess {
+                        auth.refreshProfile()
+                        canDisconnectPatreon = false
+                        membershipMessage = "This MHTalk device was disconnected. MVDownloader was not changed."
+                    }
+                    .onFailure { membershipMessage = it.message ?: "Could not disconnect this MHTalk membership" }
             }
         },
         onDownloadMvDownloader = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/mhlko-tech/MVDownloader/releases/latest"))) },
@@ -2212,9 +2231,11 @@ private fun SupportDialog(
     allowExternalMemberships: Boolean,
     onOpenLava: (String) -> Unit,
     membershipMessage: String,
+    canDisconnectPatreon: Boolean,
     onVerify: () -> Unit,
     onOpenPatreon: () -> Unit,
     onLinkPatreon: () -> Unit,
+    onDisconnectMembership: () -> Unit,
     onDownloadMvDownloader: () -> Unit,
     onShare: () -> Unit,
 ) {
@@ -2289,9 +2310,10 @@ private fun SupportDialog(
                         val price = mapOf("plus" to 5, "pro" to 7, "ultimate" to 10, "max_supporter" to 15).getValue(selectedPlan)
                         Button({ onOpenLava(selectedPlan) }, Modifier.fillMaxWidth()) { Text("Continue with LAVA · \$$price") }
                     }
-                    item { OutlinedButton(onVerify, Modifier.fillMaxWidth()) { Text("Verify membership") } }
+                    item { OutlinedButton(onVerify, Modifier.fillMaxWidth()) { Text("Check now") } }
                     item { OutlinedButton(onOpenPatreon, Modifier.fillMaxWidth()) { Text("View Patreon plans") } }
                     item { OutlinedButton(onLinkPatreon, Modifier.fillMaxWidth()) { Text("Link Patreon membership") } }
+                    if (canDisconnectPatreon) item { OutlinedButton(onDisconnectMembership, Modifier.fillMaxWidth()) { Text("Disconnect this MHTalk device") } }
                 } else {
                     item { Text("External memberships are not offered in this Google Play build.", color = MHTalkMuted, fontSize = 12.sp) }
                 }

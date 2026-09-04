@@ -1,6 +1,7 @@
 package com.mhlko.talk.data
 
 import android.content.Context
+import android.provider.Settings
 import com.mhlko.talk.BuildConfig
 import com.mhlko.talk.auth.SecureTokenStore
 import kotlinx.coroutines.Dispatchers
@@ -19,7 +20,7 @@ object MembershipService {
         .build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
-    data class SyncResult(val status: String, val tier: SubscriptionTier, val pending: Boolean)
+    data class SyncResult(val status: String, val tier: SubscriptionTier, val pending: Boolean, val provider: String, val plan: String)
 
     suspend fun createLavaSession(context: Context, accessToken: String, planId: String = "plus"): String = withContext(Dispatchers.IO) {
         require(planId in setOf("plus", "pro", "ultimate", "max_supporter")) { "Unsupported membership plan" }
@@ -48,7 +49,7 @@ object MembershipService {
         val request = Request.Builder()
             .url("$origin/subscription/patreon/start")
             .header("Authorization", "Bearer $accessToken")
-            .post("{}".toRequestBody(jsonType))
+            .post(JSONObject().put("deviceId", Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "android").toString().toRequestBody(jsonType))
             .build()
         client.newCall(request).execute().use { response ->
             val payload = runCatching { JSONObject(response.body.string()) }.getOrElse { JSONObject() }
@@ -78,8 +79,27 @@ object MembershipService {
                 status = payload.optString("status", "pending"),
                 tier = subscriptionTierFromWire(payload.optString("tier")),
                 pending = payload.optBoolean("pending"),
+                provider = payload.optString("provider", "lava"),
+                plan = payload.optString("plan", ""),
             )
         }
+    }
+
+    suspend fun disconnect(context: Context, accessToken: String) = withContext(Dispatchers.IO) {
+        val store = SecureTokenStore(context.applicationContext)
+        val token = store.get(TOKEN_KEY) ?: store.get(LEGACY_TOKEN_KEY) ?: return@withContext
+        val origin = BuildConfig.TOKEN_ENDPOINT.substringBefore("/livekit/token")
+        val request = Request.Builder()
+            .url("$origin/subscription/membership/disconnect")
+            .header("Authorization", "Bearer $accessToken")
+            .post(JSONObject().put("membershipToken", token).toString().toRequestBody(jsonType))
+            .build()
+        client.newCall(request).execute().use { response ->
+            val payload = runCatching { JSONObject(response.body.string()) }.getOrElse { JSONObject() }
+            if (!response.isSuccessful && response.code != 401) throw IllegalStateException(payload.optString("error", "Could not disconnect this MHTalk membership"))
+        }
+        store.remove(TOKEN_KEY)
+        store.remove(LEGACY_TOKEN_KEY)
     }
 
     private const val TOKEN_KEY = "mhtalk.membership.token"
