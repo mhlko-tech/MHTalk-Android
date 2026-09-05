@@ -137,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="v$RELEASE_VERSION"
-          notes="Official MHTalk Android $RELEASE_VERSION release. This update preserves LiveKit-equivalent microphone, screen-audio and Bluetooth behavior across compatible RTC providers and applies the corrected Plus, Pro, Ultimate and Max Supporter hierarchy. The direct APK uses MHTalk's original long-term signing identity, so existing users can update normally; the accompanying AAB is the Google Play-safe build."
+          notes="Official MHTalk Android $RELEASE_VERSION release. Patreon linking now creates an independent membership session for this MHTalk device. Membership details show the plan, provider, and active or gifted status; disconnecting this device preserves other application sessions, including MVDownloader. The direct APK uses MHTalk's original long-term signing identity, so existing users can update normally; the accompanying AAB is the Google Play-safe build."
 
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$APK_PATH" "$AAB_PATH" signing-report.txt SHA256SUMS.txt --clobber
