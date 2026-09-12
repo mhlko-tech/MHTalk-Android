@@ -25,7 +25,12 @@ termination and identity conflicts remain terminal.
 
 Unit coverage exercises gateway failure, cancellation, timeout, authorization,
 permission errors, duplicate routes, attempt limits and room-lock waiting.
-The local full gate passes all 30 unit tests, debug lint and APK assembly.
+The local full gate passes all 32 unit tests, debug lint and APK assembly.
 Automated checks do
 not prove two-device microphone, camera, or screen-audio behavior; those remain
 unverified until exercised on real Windows and Android devices.
+
+Tencent native `onExitRoom` now distinguishes removal/dismissal from a server
+failure. Terminal exits release the call and suppress delayed reconnect events,
+including exits received before the initial join completes.
+See [Tencent's room exit guide](https://trtc.io/document/47638).

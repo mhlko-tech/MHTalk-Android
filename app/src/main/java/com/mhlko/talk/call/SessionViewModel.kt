@@ -1961,6 +1961,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 _state.update { it.copy(status = ConnectionStatus.Connected, error = null, connectionMessage = null) }
             TencentRtcSession.ConnectionState.Failed ->
                 scheduleRecovery()
+            TencentRtcSession.ConnectionState.Terminated ->
+                failRtcRecovery(SecurityException("The Tencent room connection was ended by the server"))
         }
     }
 

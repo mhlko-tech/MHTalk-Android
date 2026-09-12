@@ -37,6 +37,7 @@ internal class TencentRtcSession(
     private var rtc: TRTCCloud? = null
     private var credentials: RoomCredentials? = null
     private var joined = CompletableDeferred<Unit>()
+    private val exitPolicy = TencentExitPolicy()
     private val members = linkedMapOf<String, TencentMember>()
     private val speaking = mutableSetOf<String>()
     private val watched = mutableSetOf<String>()
@@ -46,7 +47,7 @@ internal class TencentRtcSession(
     private var localScreenView: TXCloudVideoView? = null
 
     val connected: Boolean
-        get() = rtc != null && joined.isCompleted
+        get() = rtc != null && joined.isCompleted && !joined.isCancelled && exitPolicy.permitsRecovery
 
     val identity: String?
         get() = credentials?.identity
@@ -56,8 +57,17 @@ internal class TencentRtcSession(
 
     private val listener = object : TRTCCloudListener() {
         override fun onEnterRoom(result: Long) {
-            if (result > 0) joined.complete(Unit)
+            if (!exitPolicy.permitsRecovery) joined.completeExceptionally(exitPolicy.terminalFailure!!)
+            else if (result > 0) joined.complete(Unit)
             else joined.completeExceptionally(IllegalStateException("Tencent rejected the RTC request ($result)"))
+        }
+
+        override fun onExitRoom(reason: Int) {
+            // Local cleanup clears rtc before exitRoom(); ignore its delayed callback.
+            if (reason == 0 || rtc == null) return
+            val failure = exitPolicy.onExit(reason)
+            if (joined.isActive) joined.completeExceptionally(failure)
+            onConnectionState(if (exitPolicy.permitsRecovery) ConnectionState.Failed else ConnectionState.Terminated)
         }
 
         override fun onError(errCode: Int, errMsg: String?, extraInfo: android.os.Bundle?) {
@@ -123,11 +133,17 @@ internal class TencentRtcSession(
             onNetworkQuality(worst)
         }
 
-        override fun onTryToReconnect() = onConnectionState(ConnectionState.Reconnecting)
+        override fun onTryToReconnect() {
+            if (rtc != null && exitPolicy.permitsRecovery) onConnectionState(ConnectionState.Reconnecting)
+        }
 
-        override fun onConnectionRecovery() = onConnectionState(ConnectionState.Connected)
+        override fun onConnectionRecovery() {
+            if (rtc != null && exitPolicy.permitsRecovery) onConnectionState(ConnectionState.Connected)
+        }
 
-        override fun onConnectionLost() = onConnectionState(ConnectionState.Failed)
+        override fun onConnectionLost() {
+            if (rtc != null && exitPolicy.permitsRecovery) onConnectionState(ConnectionState.Failed)
+        }
 
         override fun onScreenCaptureStopped(reason: Int) {
             screenEnabled = false
@@ -142,6 +158,7 @@ internal class TencentRtcSession(
         val identity = credentials.identity?.takeIf(String::isNotBlank)
             ?: error("Tencent participant identity is missing")
         disconnect()
+        exitPolicy.reset()
         this.credentials = credentials
         joined = CompletableDeferred()
         val cloud = TRTCCloud.sharedInstance(context.applicationContext)
@@ -163,6 +180,7 @@ internal class TencentRtcSession(
             TRTCCloudDef.TRTC_APP_SCENE_VIDEOCALL,
         )
         withTimeout(18_000) { joined.await() }
+        exitPolicy.terminalFailure?.let { throw it }
         if (microphoneEnabled) cloud.startLocalAudio(TRTCCloudDef.TRTC_AUDIO_QUALITY_DEFAULT)
     }
 
@@ -334,5 +352,5 @@ internal class TencentRtcSession(
         Screen(TRTCCloudDef.TRTC_VIDEO_STREAM_TYPE_SUB),
     }
 
-    internal enum class ConnectionState { Connected, Reconnecting, Failed }
+    internal enum class ConnectionState { Connected, Reconnecting, Failed, Terminated }
 }
