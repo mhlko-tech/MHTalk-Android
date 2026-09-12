@@ -37,7 +37,7 @@ internal class AgoraRtcSession(
     private val context: Context,
     private val onMembers: (List<AgoraMember>) -> Unit,
     private val onPayload: (String, JSONObject) -> Unit,
-    private val onConnectionState: (Int) -> Unit,
+    private val onConnectionState: (Int, Throwable?) -> Unit,
     private val onTokenRefreshNeeded: (Boolean) -> Unit,
     private val onScreenShareStopped: () -> Unit,
 ) {
@@ -155,7 +155,30 @@ internal class AgoraRtcSession(
         }
 
         override fun onConnectionStateChanged(state: Int, reason: Int) {
-            onConnectionState(state)
+            val failure = if (state == Constants.CONNECTION_STATE_FAILED) {
+                if (reason in setOf(
+                        Constants.CONNECTION_CHANGED_INVALID_APP_ID,
+                        Constants.CONNECTION_CHANGED_INVALID_CHANNEL_NAME,
+                        Constants.CONNECTION_CHANGED_INVALID_TOKEN,
+                        Constants.CONNECTION_CHANGED_TOKEN_EXPIRED,
+                        Constants.CONNECTION_CHANGED_BANNED_BY_SERVER,
+                        Constants.CONNECTION_CHANGED_REJECTED_BY_SERVER,
+                        Constants.CONNECTION_CHANGED_LICENSE_VALIDATION_FAILURE,
+                        Constants.CONNECTION_CHANGED_CERTIFICATION_VERYFY_FAILURE,
+                    )) SecurityException("Agora authentication rejected (reason $reason)")
+                else java.io.IOException("Agora connection failed (reason $reason)")
+            } else null
+            if (failure != null && joined.isActive) joined.completeExceptionally(failure)
+            onConnectionState(state, failure)
+        }
+
+        override fun onError(err: Int) {
+            if (!joined.isActive) return
+            if (err in setOf(Constants.ERR_INVALID_APP_ID, Constants.ERR_INVALID_TOKEN, Constants.ERR_TOKEN_EXPIRED)) {
+                joined.completeExceptionally(SecurityException("Agora authentication rejected (code $err)"))
+            } else if (err in setOf(Constants.ERR_ADM_INIT_RECORDING, Constants.ERR_ADM_START_RECORDING)) {
+                joined.completeExceptionally(SecurityException("Microphone unavailable or permission denied (code $err)"))
+            }
         }
 
         override fun onTokenPrivilegeWillExpire(token: String?) {
@@ -202,8 +225,12 @@ internal class AgoraRtcSession(
             autoSubscribeAudio = true
             autoSubscribeVideo = false
         }
-        check(rtc.joinChannelWithUserAccount(credentials.token, credentials.roomName, identity, options) == 0) {
-            "Agora rejected the room connection"
+        val result = rtc.joinChannelWithUserAccount(credentials.token, credentials.roomName, identity, options)
+        if (result != 0) {
+            if (-result in setOf(Constants.ERR_INVALID_APP_ID, Constants.ERR_INVALID_TOKEN, Constants.ERR_TOKEN_EXPIRED)) {
+                throw SecurityException("Agora authentication rejected (code $result)")
+            }
+            error("Agora rejected the RTC request (code $result)")
         }
         joined.await()
     }

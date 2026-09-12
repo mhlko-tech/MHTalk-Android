@@ -57,7 +57,7 @@ internal class TencentRtcSession(
     private val listener = object : TRTCCloudListener() {
         override fun onEnterRoom(result: Long) {
             if (result > 0) joined.complete(Unit)
-            else joined.completeExceptionally(IllegalStateException("Tencent rejected the room connection ($result)"))
+            else joined.completeExceptionally(IllegalStateException("Tencent rejected the RTC request ($result)"))
         }
 
         override fun onError(errCode: Int, errMsg: String?, extraInfo: android.os.Bundle?) {

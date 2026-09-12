@@ -17,6 +17,7 @@ import android.provider.OpenableColumns
 import android.provider.MediaStore
 import android.content.ContentValues
 import android.os.Environment
+import android.os.SystemClock
 import android.util.Base64
 import android.os.Build
 import android.view.SurfaceView
@@ -34,6 +35,7 @@ import com.mhlko.talk.data.AvatarCropSelection
 import com.mhlko.talk.data.calculateAvatarCrop
 import com.mhlko.talk.data.ConnectionStatus
 import com.mhlko.talk.data.MHTalkApi
+import com.mhlko.talk.data.MHTalkApiException
 import com.mhlko.talk.data.MemberUi
 import com.mhlko.talk.data.RoomCredentials
 import com.mhlko.talk.data.SessionUiState
@@ -50,6 +52,7 @@ import io.livekit.android.audio.AudioBufferCallback
 import io.livekit.android.LiveKit
 import io.livekit.android.RoomOptions
 import io.livekit.android.events.RoomEvent
+import io.livekit.android.events.DisconnectReason
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
 import io.livekit.android.room.datastream.StreamBytesOptions
@@ -74,6 +77,9 @@ import io.getstream.android.video.generated.models.CustomVideoEvent
 import io.getstream.video.android.model.User as StreamUser
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -193,10 +199,13 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     private var updateJob: Job? = null
     private var wantedRoom: String? = null
     private var wantedInviteCode: String? = null
+    private var clientSessionId: String? = null
     private var attachmentAccessToken: String? = null
     private var usageAccessToken: String? = null
     private var usageWindowStartedAt: Long? = null
     private var usageReportJob: Job? = null
+    private var connectionJob: Job? = null
+    private val recoveryBudget = RtcRecoveryBudget()
     private var userLeft = false
     private val attachmentJobs = mutableMapOf<String, Job>()
     private var voiceRecorder: MediaRecorder? = null
@@ -274,50 +283,84 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         roomName: String,
         inviteCode: String?,
         rtcProviders: List<String>,
+        excludedRtcProviders: List<String> = emptyList(),
+        sessionId: String? = clientSessionId,
     ) = api.credentials(
         roomName = roomName,
         inviteCode = inviteCode,
         supportedRtcProviders = rtcProviders,
         supportedMessagingProviders = supportedMessagingProviders,
         supportedFileProviders = supportedFileProviders,
+        excludedRtcProviders = excludedRtcProviders,
+        clientSessionId = sessionId,
     )
 
-    private fun connect(roomName: String, inviteCode: String?) {
-        if (_state.value.status == ConnectionStatus.Connecting) return
-        viewModelScope.launch {
+    private fun connect(
+        roomName: String,
+        inviteCode: String?,
+        initiallyExcluded: List<String> = emptyList(),
+        reuseSession: Boolean = false,
+    ) {
+        if (connectionJob?.isActive == true) return
+        val previousConnection = connectionJob
+        connectionJob = viewModelScope.launch {
+            previousConnection?.join()
             clearRemoteTyping()
-            stopUsageReporting(flush = false)
+            stopUsageReporting(flush = true)
             userLeft = false
+            if (!reuseSession) recoveryBudget.reset(SystemClock.elapsedRealtime())
+            if (!reuseSession || clientSessionId == null) clientSessionId = UUID.randomUUID().toString()
             wantedRoom = roomName
             wantedInviteCode = inviteCode
             _state.update { it.copy(status = ConnectionStatus.Connecting, error = null, connectionMessage = "Selecting the best available server…") }
-            runCatching {
-                if (_state.value.roomName != null) {
-                    room.disconnect()
-                    disconnectStream()
-                    agoraRtc.disconnect()
-                    tencentRtc.disconnect()
-                    cloudflareRtc.disconnect()
+            try {
+                disconnectRtcTransports()
+                _state.update {
+                    it.copy(cameraEnabled = false, screenShareEnabled = false, screenShareAudioEnabled = false, localSpeaking = false, members = emptyList())
                 }
-                val credentials = withTimeout(12_000) {
-                    requestCredentials(roomName, inviteCode, rtcAdapters.routableProviders)
-                }
+                val (credentials, connection) = connectWithRtcFailover(
+                    providers = rtcAdapters.routableProviders,
+                    initiallyExcluded = initiallyExcluded,
+                    credentials = { excluded ->
+                        withTimeout(12_000) {
+                            requestCredentials(roomName, inviteCode, rtcAdapters.routableProviders, excluded)
+                        }
+                    },
+                    connect = { allocation ->
+                        // Keep the allocation visible to leave() even while the SDK is joining.
+                        usageAccessToken = allocation.usageAccessToken
+                        attachmentAccessToken = allocation.attachmentAccessToken
+                        _state.update {
+                            it.copy(
+                                subscriptionTier = allocation.subscriptionTier,
+                                rtcProvider = allocation.provider,
+                                messagingProvider = allocation.messagingProvider,
+                                fileProvider = allocation.fileProvider,
+                                connectionMessage = "Connecting to the room…",
+                            )
+                        }
+                        rtcAdapters.connect(allocation)
+                    },
+                    release = { allocation ->
+                        disconnectRtcTransports()
+                        if (usageAccessToken == allocation.usageAccessToken) {
+                            usageAccessToken = null
+                            attachmentAccessToken = null
+                        }
+                        allocation.usageAccessToken?.takeIf(String::isNotBlank)?.let { token ->
+                            val now = System.currentTimeMillis()
+                            runCatching { withTimeout(5_000) { reportRtcUsage(token, now, now, leaving = true) } }
+                        }
+                    },
+                    onRetry = {
+                        _state.update { it.copy(status = ConnectionStatus.Connecting, error = null, connectionMessage = "Trying another available server…") }
+                    },
+                )
+                currentCoroutineContext().ensureActive()
                 attachmentAccessToken = credentials.attachmentAccessToken
                 usageAccessToken = credentials.usageAccessToken
-                _state.update {
-                    it.copy(
-                        subscriptionTier = credentials.subscriptionTier,
-                        rtcProvider = credentials.provider,
-                        messagingProvider = credentials.messagingProvider,
-                        fileProvider = credentials.fileProvider,
-                        connectionMessage = "Connecting to the room…",
-                    )
-                }
-                when (val connection = rtcAdapters.connect(credentials)) {
-                    is RtcConnectionResult.Embedded -> Pair(connection.roomName, connection.url)
-                    is RtcConnectionResult.Native -> Pair(connection.roomName, null)
-                }
-            }.onSuccess { (actualRoom, embeddedCallUrl) ->
+                val actualRoom = connection.roomName
+                val embeddedCallUrl = (connection as? RtcConnectionResult.Embedded)?.url
                 if (embeddedCallUrl == null && _state.value.rtcProvider != "livekit") {
                     audioRouteController.start()
                 } else {
@@ -342,27 +385,38 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     sendProfile()
                     requestProfiles()
                 }
-            }.onFailure {
-                stopUsageReporting(flush = false)
-                showFailure(it)
+            } catch (failure: Throwable) {
+                stopUsageReporting(flush = true)
+                attachmentAccessToken = null
+                disconnectRtcTransports()
+                currentCoroutineContext().ensureActive()
+                _state.update { it.copy(status = ConnectionStatus.Failed, connectionMessage = null) }
+                showFailure(failure)
             }
         }
+    }
+
+    private fun disconnectRtcTransports() {
+        runCatching { stopScreenAudio() }
+        runCatching { room.disconnect() }
+        runCatching { disconnectStream() }
+        runCatching { agoraRtc.disconnect() }
+        runCatching { tencentRtc.disconnect() }
+        runCatching { cloudflareRtc.disconnect() }
+        audioRouteController.stop()
+        getApplication<Application>().stopService(Intent(getApplication(), CallService::class.java))
     }
 
     fun leave() {
         clearRemoteTyping()
         userLeft = true
+        connectionJob?.cancel()
         wantedRoom = null
         wantedInviteCode = null
+        clientSessionId = null
         attachmentAccessToken = null
         stopUsageReporting(flush = true)
-        room.disconnect()
-        disconnectStream()
-        agoraRtc.disconnect()
-        tencentRtc.disconnect()
-        cloudflareRtc.disconnect()
-        audioRouteController.stop()
-        getApplication<Application>().stopService(Intent(getApplication(), CallService::class.java))
+        disconnectRtcTransports()
         _state.value = SessionUiState(
             termsAccepted = preferences.getBoolean("legal.termsAccepted", false),
             mainActiveCount = _state.value.mainActiveCount,
@@ -386,9 +440,11 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     private fun startUsageReporting() {
         usageReportJob?.cancel()
-        if (usageAccessToken.isNullOrBlank()) return
-        usageWindowStartedAt = System.currentTimeMillis()
+        val token = usageAccessToken?.takeIf(String::isNotBlank) ?: return
+        val now = System.currentTimeMillis()
+        usageWindowStartedAt = now
         usageReportJob = viewModelScope.launch {
+            runCatching { withTimeout(5_000) { reportRtcUsage(token, now, now, leaving = false) } }
             while (isActive) {
                 delay(60_000)
                 reportRtcUsage()
@@ -404,8 +460,11 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         val to = System.currentTimeMillis()
         usageAccessToken = null
         usageWindowStartedAt = null
-        if (flush && !token.isNullOrBlank() && from != null && to - from >= 10_000) {
-            viewModelScope.launch { reportRtcUsage(token, from, to, leaving = true) }
+        if (flush && !token.isNullOrBlank()) {
+            val measuredFrom = from?.takeIf { to - it >= 10_000 } ?: to
+            viewModelScope.launch(NonCancellable) {
+                runCatching { withTimeout(5_000) { reportRtcUsage(token, measuredFrom, to, leaving = true) } }
+            }
         }
     }
 
@@ -419,13 +478,26 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private suspend fun reportRtcUsage(token: String, from: Long, to: Long, leaving: Boolean) {
-        api.reportRtcUsage(
-            usageAccessToken = token,
-            reportId = UUID.randomUUID().toString(),
-            measuredFrom = Instant.ofEpochMilli(from).toString(),
-            measuredTo = Instant.ofEpochMilli(to).toString(),
-            leaving = leaving,
-        )
+        try {
+            api.reportRtcUsage(
+                usageAccessToken = token,
+                reportId = UUID.randomUUID().toString(),
+                measuredFrom = Instant.ofEpochMilli(from).toString(),
+                measuredTo = Instant.ofEpochMilli(to).toString(),
+                leaving = leaving,
+            )
+        } catch (failure: MHTalkApiException) {
+            if (!leaving && failure.status == 409 && failure.code in setOf("RTC_PROVIDER_UNAVAILABLE", "RTC_ROOM_ROUTE_CHANGED")) {
+                viewModelScope.launch {
+                    connectionJob?.join()
+                    if (!userLeft && usageAccessToken == token) {
+                        val excluded = if (failure.code == "RTC_ROOM_ROUTE_CHANGED") emptyList() else listOf(_state.value.rtcProvider)
+                        scheduleRecovery(excluded)
+                    }
+                }
+            }
+            throw failure
+        }
     }
 
     fun toggleMicrophone() {
@@ -1545,6 +1617,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         roomEventsJob?.cancel()
         roomEventsJob = viewModelScope.launch {
             room.events.collect { event ->
+                if (userLeft || _state.value.rtcProvider != "livekit" || _state.value.status in setOf(ConnectionStatus.Idle, ConnectionStatus.Failed)) return@collect
                 when (event) {
                     is RoomEvent.Connected,
                     is RoomEvent.ActiveSpeakersChanged,
@@ -1575,7 +1648,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         syncParticipants()
                     }
 
-                    is RoomEvent.Reconnecting -> if (_state.value.rtcProvider == "livekit") {
+                    is RoomEvent.Reconnecting -> if (_state.value.rtcProvider == "livekit" && connectionJob?.isActive != true && !userLeft) {
                         _state.update { it.copy(status = ConnectionStatus.Recovering) }
                     }
                     is RoomEvent.ParticipantConnected -> {
@@ -1588,16 +1661,29 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         syncParticipants()
                     }
                     is RoomEvent.Reconnected -> {
+                        if (_state.value.rtcProvider != "livekit" || connectionJob?.isActive == true || userLeft) return@collect
                         _state.update { it.copy(status = ConnectionStatus.Connected, error = null) }
                         sendProfile()
                         requestProfiles()
                         syncParticipants()
                     }
                     is RoomEvent.Disconnected -> {
-                        if (!userLeft && wantedRoom != null && _state.value.rtcProvider == "livekit") scheduleRecovery()
+                        if (connectionJob?.isActive != true && wantedRoom != null) {
+                            if (event.reason in setOf(
+                                    DisconnectReason.CLIENT_INITIATED,
+                                    DisconnectReason.DUPLICATE_IDENTITY,
+                                    DisconnectReason.PARTICIPANT_REMOVED,
+                                    DisconnectReason.ROOM_DELETED,
+                                    DisconnectReason.ROOM_CLOSED,
+                                    DisconnectReason.USER_REJECTED,
+                                )) failRtcRecovery(IllegalStateException("The room connection was ended (${event.reason})"))
+                            else scheduleRecovery()
+                        }
                     }
                     is RoomEvent.DataReceived -> handleData(event)
-                    is RoomEvent.FailedToConnect -> showFailure(event.error)
+                    is RoomEvent.FailedToConnect -> {
+                        if (_state.value.rtcProvider == "livekit" && connectionJob?.isActive != true && !userLeft) scheduleRecovery()
+                    }
                     else -> Unit
                 }
             }
@@ -1846,7 +1932,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         verifyMemberBadges(_state.value.members.map(MemberUi::identity))
     }
 
-    private fun handleAgoraConnectionState(state: Int) {
+    private fun handleAgoraConnectionState(state: Int, failure: Throwable?) {
+        if (_state.value.rtcProvider != "agora" || connectionJob?.isActive == true || userLeft || _state.value.status !in setOf(ConnectionStatus.Connected, ConnectionStatus.Recovering)) return
         when (state) {
             io.agora.rtc2.Constants.CONNECTION_STATE_RECONNECTING ->
                 _state.update { it.copy(status = ConnectionStatus.Recovering) }
@@ -1854,23 +1941,31 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 if (_state.value.status == ConnectionStatus.Recovering) {
                     _state.update { it.copy(status = ConnectionStatus.Connected, error = null, connectionMessage = null) }
                 }
-            io.agora.rtc2.Constants.CONNECTION_STATE_FAILED ->
-                showFailure(IllegalStateException("Agora could not restore the call"))
+            io.agora.rtc2.Constants.CONNECTION_STATE_FAILED -> {
+                if (failure != null && !canRetryRtcConnection(failure)) {
+                    viewModelScope.launch {
+                        if (userLeft || _state.value.rtcProvider != "agora" || connectionJob?.isActive == true) return@launch
+                        failRtcRecovery(failure)
+                    }
+                } else scheduleRecovery()
+            }
         }
     }
 
     private fun handleTencentConnectionState(state: TencentRtcSession.ConnectionState) {
+        if (_state.value.rtcProvider != "tencent" || connectionJob?.isActive == true || userLeft || _state.value.status !in setOf(ConnectionStatus.Connected, ConnectionStatus.Recovering)) return
         when (state) {
             TencentRtcSession.ConnectionState.Reconnecting ->
                 _state.update { it.copy(status = ConnectionStatus.Recovering) }
             TencentRtcSession.ConnectionState.Connected ->
                 _state.update { it.copy(status = ConnectionStatus.Connected, error = null, connectionMessage = null) }
             TencentRtcSession.ConnectionState.Failed ->
-                showFailure(IllegalStateException("Tencent could not restore the call"))
+                scheduleRecovery()
         }
     }
 
     private fun handleCloudflareConnectionState(state: CloudflareRtcSession.ConnectionState) {
+        if (_state.value.rtcProvider != "cloudflare-realtime" || connectionJob?.isActive == true || userLeft || _state.value.status !in setOf(ConnectionStatus.Connected, ConnectionStatus.Recovering)) return
         when (state) {
             CloudflareRtcSession.ConnectionState.Connecting -> Unit
             CloudflareRtcSession.ConnectionState.Reconnecting ->
@@ -1880,17 +1975,22 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     _state.update { it.copy(status = ConnectionStatus.Connected, error = null, connectionMessage = null) }
                 }
             CloudflareRtcSession.ConnectionState.Failed ->
-                showFailure(IllegalStateException("Cloudflare could not restore the call"))
+                scheduleRecovery()
         }
     }
 
     private fun refreshAgoraCredentials() {
         val roomName = wantedRoom ?: return
+        val sessionId = clientSessionId
+        val inviteCode = wantedInviteCode
         viewModelScope.launch {
+            if (userLeft || sessionId != clientSessionId || wantedRoom != roomName || _state.value.rtcProvider != "agora") return@launch
             runCatching {
-                requestCredentials(roomName, wantedInviteCode, listOf("agora"))
+                requestCredentials(roomName, inviteCode, listOf("agora"), sessionId = sessionId)
             }.onSuccess { credentials ->
-                if (credentials.provider == "agora") agoraRtc.renewCredentials(credentials)
+                if (!userLeft && sessionId == clientSessionId && wantedRoom == roomName && _state.value.rtcProvider == "agora" && credentials.provider == "agora") {
+                    agoraRtc.renewCredentials(credentials)
+                }
             }
         }
     }
@@ -2141,46 +2241,21 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         screenAudioCapturer = null
     }
 
-    private fun scheduleRecovery() {
-        if (_state.value.status == ConnectionStatus.Recovering) return
-        _state.update { it.copy(status = ConnectionStatus.Recovering, error = null, connectionMessage = "Reconnecting through an available server…") }
-        viewModelScope.launch {
-            var delayMs = 600L
-            while (isActive && !userLeft && wantedRoom != null) {
-                delay(delayMs)
-                val name = wantedRoom ?: break
-                val result = runCatching {
-                    val credentials = withTimeout(12_000) {
-                        requestCredentials(name, wantedInviteCode, listOf("livekit"))
-                    }
-                    require(credentials.provider == "livekit") {
-                        "This app version cannot open the selected room connection"
-                    }
-                    _state.update {
-                        it.copy(
-                            subscriptionTier = credentials.subscriptionTier,
-                            rtcProvider = credentials.provider,
-                            messagingProvider = credentials.messagingProvider,
-                            fileProvider = credentials.fileProvider,
-                            connectionMessage = "Connecting to the room…",
-                        )
-                    }
-                    configureCameraQuality(credentials.subscriptionTier)
-                    withTimeout(18_000) { room.connect(credentials.serverUrl, credentials.token) }
-                    room.localParticipant.setMicrophoneEnabled(_state.value.microphoneEnabled)
-                    sendProfile()
-                    credentials.roomName
-                }
-                if (result.isSuccess) {
-                    _state.update {
-                        it.copy(status = ConnectionStatus.Connected, roomName = result.getOrNull(), error = null, connectionMessage = null)
-                    }
-                    syncParticipants()
-                    break
-                }
-                delayMs = (delayMs * 2).coerceAtMost(8_000L)
-            }
+    private fun scheduleRecovery(excluded: List<String> = listOf(_state.value.rtcProvider)) {
+        val name = wantedRoom ?: return
+        if (userLeft || connectionJob?.isActive == true || _state.value.status !in setOf(ConnectionStatus.Connected, ConnectionStatus.Recovering)) return
+        if (!recoveryBudget.consume(SystemClock.elapsedRealtime())) {
+            failRtcRecovery(IllegalStateException("Automatic connection recovery was exhausted. Please rejoin the room."))
+            return
         }
+        connect(name, wantedInviteCode, excluded, reuseSession = true)
+    }
+
+    private fun failRtcRecovery(failure: Throwable) {
+        _state.update { it.copy(status = ConnectionStatus.Failed, connectionMessage = null) }
+        stopUsageReporting(flush = true)
+        disconnectRtcTransports()
+        showFailure(failure)
     }
 
     private fun pollMainCount() {
@@ -2239,13 +2314,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     override fun onCleared() {
         runCatching { getApplication<Application>().unregisterReceiver(taskRemovedReceiver) }
-        stopUsageReporting(flush = false)
-        room.disconnect()
-        disconnectStream()
-        agoraRtc.disconnect()
-        tencentRtc.disconnect()
-        cloudflareRtc.disconnect()
-        audioRouteController.stop()
+        userLeft = true
+        connectionJob?.cancel()
+        stopUsageReporting(flush = true)
+        disconnectRtcTransports()
         super.onCleared()
     }
 }

@@ -2,16 +2,25 @@ package com.mhlko.talk.data
 
 import com.mhlko.talk.BuildConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import org.json.JSONObject
 import java.io.InputStream
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+class MHTalkApiException(val status: Int, val code: String?, message: String) : IOException(message)
 
 data class RoomCredentials(
     val token: String,
@@ -58,13 +67,17 @@ class MHTalkApi(private val accessToken: () -> String? = { null }) {
         supportedRtcProviders: List<String>,
         supportedMessagingProviders: List<String>,
         supportedFileProviders: List<String>,
+        excludedRtcProviders: List<String> = emptyList(),
+        clientSessionId: String? = null,
     ): RoomCredentials = post(
         BuildConfig.TOKEN_ENDPOINT,
         JSONObject().put("roomName", roomName).apply {
             if (!inviteCode.isNullOrBlank()) put("inviteCode", inviteCode.trim().uppercase())
             put("clientPlatform", "android")
             put("clientVersion", BuildConfig.VERSION_NAME)
+            if (!clientSessionId.isNullOrBlank()) put("clientSessionId", clientSessionId)
             put("capabilitiesVersion", 2)
+            put("excludedRtcProviders", org.json.JSONArray().apply { excludedRtcProviders.distinct().forEach(::put) })
             put(
                 "supportedRtcProviders",
                 org.json.JSONArray().apply { supportedRtcProviders.forEach(::put) },
@@ -253,13 +266,33 @@ class MHTalkApi(private val accessToken: () -> String? = { null }) {
             .apply { accessToken()?.let { header("Authorization", "Bearer $it") } }
             .post(body.toString().toRequestBody(jsonType))
             .build()
-        client.newCall(request).execute().use { response ->
-            val text = response.body.string()
-            if (!response.isSuccessful) {
-                val message = runCatching { JSONObject(text).optString("error") }.getOrNull()
-                throw IllegalStateException(message?.takeIf { it.isNotBlank() } ?: "Connection service unavailable")
-            }
-            JSONObject(text)
+        suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    val result = runCatching {
+                        response.use {
+                            val text = it.body.string()
+                            if (!it.isSuccessful) {
+                                val payload = runCatching { JSONObject(text) }.getOrNull()
+                                throw MHTalkApiException(
+                                    it.code,
+                                    payload?.optString("code")?.takeIf(String::isNotBlank),
+                                    payload?.optString("error")?.takeIf(String::isNotBlank)
+                                        ?: "Connection service unavailable (HTTP ${it.code})",
+                                )
+                            }
+                            JSONObject(text)
+                        }
+                    }
+                    if (continuation.isActive) result.fold(continuation::resume, continuation::resumeWithException)
+                }
+            })
         }
     }
 
